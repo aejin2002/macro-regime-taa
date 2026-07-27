@@ -171,3 +171,52 @@ def test_no_forward_fill_across_a_missing_month_and_correct_common_start():
 
     assert KODEX200_USD_COLUMN in returns.columns
     assert returns.notna().all().all()
+
+
+def _fake_client_with_daily_index(idx: pd.DatetimeIndex, seed: int) -> _FakeAssetPriceClient:
+    rng = np.random.default_rng(seed)
+    n = len(idx)
+    return _FakeAssetPriceClient(
+        {
+            "SPY": pd.Series(100 + np.cumsum(rng.normal(size=n)), index=idx),
+            "BIL": pd.Series(100 + np.cumsum(rng.normal(size=n)), index=idx),
+            "GLD": pd.Series(100 + np.cumsum(rng.normal(size=n)), index=idx),
+            "069500.KS": pd.Series(100 + np.cumsum(rng.normal(size=n)), index=idx),
+            "KRW=X": pd.Series(1200 + np.cumsum(rng.normal(scale=1, size=n)), index=idx),
+        }
+    )
+
+
+_MINI_CONFIG = {
+    "growth_basket": {
+        "spy_weight": 0.6,
+        "kodex200_weight": 0.4,
+        "kodex200_ticker": "069500.KS",
+        "fx_ticker": "KRW=X",
+    },
+    "backtest": {"assets": {"spy": "SPY", "gold": "GLD", "tbills": "BIL"}},
+}
+
+
+def test_in_progress_month_is_excluded_until_it_actually_completes():
+    # Daily data runs through 2020-07-10 -- July has not finished yet.
+    # resample("ME").last() would otherwise stamp that partial data
+    # "2020-07-31", a future date relative to `as_of`.
+    idx_partial_july = pd.bdate_range("2020-01-01", "2020-07-10")
+    client_partial = _fake_client_with_daily_index(idx_partial_july, seed=2)
+
+    as_of_mid_july = pd.Timestamp("2020-07-10")
+    returns_partial, _ = build_monthly_return_matrix(
+        _MINI_CONFIG, client=client_partial, start="2020-01-01", as_of=as_of_mid_july
+    )
+    assert pd.Timestamp("2020-07-31") not in returns_partial.index
+    assert returns_partial.index.max() <= pd.Timestamp("2020-06-30")
+
+    # Once July has actually closed (daily data covers the full month and
+    # `as_of` is past month-end), the July row must be included.
+    idx_full_july = pd.bdate_range("2020-01-01", "2020-07-31")
+    client_full = _fake_client_with_daily_index(idx_full_july, seed=2)
+    returns_full, _ = build_monthly_return_matrix(
+        _MINI_CONFIG, client=client_full, start="2020-01-01", as_of=pd.Timestamp("2020-08-05")
+    )
+    assert pd.Timestamp("2020-07-31") in returns_full.index

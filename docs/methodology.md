@@ -374,6 +374,19 @@ close within the month only** -- a month with no data produces `NaN`
 and is never forward- or backward-filled across the gap
 (`utils/dates.py::resample_to_monthly`, reused as-is).
 
+**The most recent, still-in-progress calendar month is always excluded.**
+`resample("ME").last()` labels whatever the latest available trading day
+is with that *future* calendar month-end date -- e.g. if today is
+2026-07-27 and the latest fetched close is 2026-07-24, that row gets
+stamped "2026-07-31" even though July has four more trading days left.
+Using it as a "monthly return" would silently understate/misstate the
+month. `backtest/assets.py::build_monthly_return_matrix` drops any row
+whose date is after `as_of` (real current time by default, injectable
+for tests) before computing the common start date or any downstream
+metric -- confirmed live: this moved the reported end date from
+2026-07-31 (partial) to 2026-06-30 (the last fully-elapsed month) the
+first time it was checked.
+
 **The backtest starts at the first month-end where every asset in the
 universe has a real return -- not the 1990+ history used by the macro
 signals.** All 9 US-listed tickers have data by 2007-05 (`BIL`'s
