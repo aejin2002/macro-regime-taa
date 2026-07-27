@@ -30,11 +30,24 @@ version. The priority is computing the signals correctly and measuring
 their forecast skill, not trading them.
 
 **Core model data source policy:** the two core operational models
-(Model A, Model B below) use only FRED-API-auto-fetched data. No
+(Primary, Secondary below) use only FRED-API-auto-fetched data. No
 external XLSX, manually-supplied CSV, or scraped data in a core model.
 Older models that require an optional external CSV remain in the
 codebase for baseline comparison, clearly labeled legacy/auxiliary --
-they are never part of the core Model A/B pairing.
+they are never part of Primary/Secondary.
+
+**As of commit `40e43d7`, the macro signal models are frozen:**
+
+| Core model | Growth | Inflation |
+|---|---|---|
+| **Primary** | US OECD CLI | Core Inflation Momentum |
+| **Secondary** (robustness check) | AMTMNO + Initial Claims | Core Inflation Momentum |
+
+Cleveland Median CPI Momentum and Commodity + Core are auxiliary/research
+models only -- a challenger experiment (see `docs/methodology.md`) found
+Core Inflation Momentum the stronger, more consistent inflation axis for
+both. No further indicator search or formula tuning happens on Primary/
+Secondary without an explicit decision to unfreeze them.
 
 ## Growth Asset Basket
 
@@ -129,29 +142,25 @@ for the Conference Board LEI -- the LEI must be supplied via
 
 | Model | Inputs | Rule | Status |
 |---|---|---|---|
-| A -- OECD CLI | `USALOLITOAASTSAM` (US) | Sign of `CLI_t - CLI_t-3`, with an optional 3m/6m-agreement stabilization rule | Core (Model A) |
+| A -- OECD CLI | `USALOLITOAASTSAM` (US) | Sign of `CLI_t - CLI_t-3`, with an optional 3m/6m-agreement stabilization rule | **Primary** growth axis |
 | B -- FRED Minimal | Initial Claims, Building Permits, CFNAI-MA3 | `mean(-z(Δ3m claims), z(Δ6m permits), z(CFNAI-MA3))` | Baseline/proxy |
 | C -- Simple Two-Signal | ISM New Orders (CSV), Initial Claims | `(z(Δ3m ISM) - z(Δ3m claims)) / 2`; disabled without the ISM CSV | Legacy (external CSV) |
-| D -- AMTMNO + Claims | `AMTMNO`, Initial Claims | `mean(z(Δ3m AMTMNO), -z(Δ3m claims))`; fully FRED-native | Core (Model B) |
+| D -- AMTMNO + Claims | `AMTMNO`, Initial Claims | `mean(z(Δ3m AMTMNO), -z(Δ3m claims))`; fully FRED-native | **Secondary** growth axis |
 
 ## Inflation models
 
 | Model | Inputs | Rule | Status |
 |---|---|---|---|
-| A -- Realized Core Inflation Momentum | Core CPI | `core_3m_annualized - core_12m` | Core (Model B inflation axis) |
+| A -- Realized Core Inflation Momentum | Core CPI | `core_3m_annualized - core_12m` | **Primary and Secondary** inflation axis (current-environment classifier -- see Methodology) |
 | B -- Leading Inflation Composite | ISM Prices Paid (CSV, optional), 5Y breakeven, Core CPI momentum | `mean(z(Δ3m ISM prices paid), z(Δ3m breakeven), z(core momentum))`; falls back to a 2-signal variant without ISM | Baseline/proxy |
-| C -- Cleveland Median CPI Momentum | `MEDCPIM158SFRBCLE` | 3m MA of Median CPI vs. itself 3 months prior; **not** the Cleveland Fed Inflation Nowcast (see Methodology) | Core (Model A inflation axis) |
+| C -- Cleveland Median CPI Momentum | `MEDCPIM158SFRBCLE` | 3m MA of Median CPI vs. itself 3 months prior; **not** the Cleveland Fed Inflation Nowcast (see Methodology) | Auxiliary/research (rejected as core inflation axis) |
 | D -- Commodity + Core | `PALLFNFINDEXM`, Core CPI momentum | `mean(z(Δ3m commodity index), z(core momentum))`; **2-signal only, no ISM input** | Auxiliary/secondary |
 
 Full formulas, windows, and rationale: `docs/methodology.md`.
 
-**Core research models** (fully FRED-native, always computable from a
-live fetch alone): **Model A** = Growth CLI x Inflation Cleveland Median
-CPI (`regime_us_cli_cleveland_median_cpi`); **Model B** = Growth
-AMTMNO+Claims x Inflation Core Momentum
-(`regime_amtmno_claims_core_momentum`). FRED Minimal, ISM Simple
-Two-Signal, Leading Inflation Composite, and Commodity+Core remain
-active as legacy/auxiliary baselines only.
+FRED Minimal, ISM Simple Two-Signal, Leading Inflation Composite,
+Cleveland Median CPI, and Commodity+Core remain active as legacy/
+auxiliary baselines only -- never part of Primary/Secondary.
 
 ## Regime mapping
 
@@ -159,6 +168,19 @@ See the table under Purpose above. Every `growth_model x inflation_model`
 pair produces its own `regime_<growth>_<inflation>` column; the mapping
 from column name to model pair is written to
 `data/processed/regime_metadata.json` by `build-signals`.
+
+## Standard regime output (asset allocation)
+
+`build-regime-output` produces the asset-allocation-ready output for
+Primary and Secondary: `data/processed/regime_output_primary.csv` /
+`regime_output_secondary.csv`, each with columns `growth_score`,
+`growth_state`, `inflation_score`, `inflation_state`, `raw_regime`,
+`tradable_regime`. `tradable_regime[t] = raw_regime[t-1]`
+(`regime_output.tradable_lag_months` in `config/default.yaml`) -- a
+1-month portfolio-application lag, not the same mechanism as FRED
+publication lag. See `docs/methodology.md`, "Standard regime output",
+for the full semantics and caveats (revised-data backtest, Core
+Inflation Momentum as a current-environment classifier).
 
 ## Running the pipeline
 
@@ -174,7 +196,8 @@ Or via the CLI directly:
 python -m macro_regime.cli fetch --start-date 1990-01-01
 python -m macro_regime.cli build-signals --growth-model all --inflation-model all
 python -m macro_regime.cli evaluate
-python -m macro_regime.cli run-all
+python -m macro_regime.cli build-regime-output
+python -m macro_regime.cli run-all   # fetch -> build-signals -> evaluate -> build-regime-output
 ```
 
 Options: `--start-date`, `--end-date`, `--refresh-cache`,
@@ -188,8 +211,8 @@ make app
 ```
 
 Pages: Overview, Data Explorer, Growth Models, Inflation Models, Regime
-Comparison, Evaluation, Methodology. Run `make run-all` (or the CLI
-commands above) at least once before launching the app so
+Comparison, Regime Output, Evaluation, Methodology. Run `make run-all`
+(or the CLI commands above) at least once before launching the app so
 `data/processed/*` exists.
 
 ## Tests and linting

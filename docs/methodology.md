@@ -177,33 +177,104 @@ now has no code path that can produce or claim a 3-signal result. It is
 kept only as a secondary research signal for comparison, not part of the
 core Model A/B pairing.
 
-## Research models (Model A / Model B) -- the core operational models
+## Core models: Primary / Secondary (frozen as of commit `40e43d7`)
 
-These are the two core, fully FRED-native models this project is built
-around. Both are always computable end-to-end from a live FRED fetch
-alone -- no external CSV is required for either:
+**As of commit `40e43d7`, the macro signal models are frozen.** No further
+indicator search or formula tuning happens on these two models absent an
+explicit decision to unfreeze them:
 
-| Research model | Growth | Inflation | Regime column |
+| Core model | Growth | Inflation | Regime column (`signals.csv`) |
 |---|---|---|---|
-| Model A | US OECD CLI (Growth Model A) | Cleveland Median CPI Momentum (Inflation Model C) | `regime_us_cli_cleveland_median_cpi` |
-| Model B | AMTMNO + Initial Claims (Growth Model D) | Core Inflation Momentum (Inflation Model A) | `regime_amtmno_claims_core_momentum` |
+| **Primary** | US OECD CLI (Growth Model A) | Core Inflation Momentum (Inflation Model A) | `regime_us_cli_core_momentum` |
+| **Secondary** (robustness check) | AMTMNO + Initial Claims (Growth Model D) | Core Inflation Momentum (Inflation Model A) | `regime_amtmno_claims_core_momentum` |
+
+Both share the same inflation axis (Core Inflation Momentum) and differ
+only in the growth axis -- Secondary exists to check whether Primary's
+regime call is corroborated by an independent, fully FRED-native growth
+measure. See "Standard regime output" below for the asset-allocation-ready
+form of these two models.
+
+**Cleveland Median CPI Momentum (Model C) and Commodity + Core (Model D)
+are auxiliary/research models only** -- an earlier iteration used
+Cleveland Median CPI as Primary's inflation axis, but a dedicated
+challenger experiment (Sticky Price CPI vs. Core Inflation Momentum, and
+a full audit of all four candidate axes) found Core Inflation Momentum
+the stronger, more consistent choice at both 3m and 6m horizons and under
+a 1-month signal-lag stress test. Cleveland Median CPI and Commodity +
+Core remain in the codebase and are still evaluated in `signals.csv` /
+`evaluation_report.json` for research visibility, but are never part of
+Primary or Secondary.
 
 Everything else the pipeline computes is legacy or auxiliary, kept for
-baseline comparison only, and explicitly **not** part of the core
-Model A/B pairing:
+baseline comparison only, and explicitly **not** part of Primary/Secondary:
 
 | Column | Status | Why |
 |---|---|---|
 | `growth_model_fred_minimal` | Baseline/proxy | Pre-existing baseline, FRED-native, kept as-is |
 | `growth_model_two_signal` (Growth Model C) | Legacy | Requires `ism_new_orders.csv`; core policy excludes external-CSV models |
 | `inflation_model_leading_composite` (Inflation Model B) | Baseline/proxy | Pre-existing baseline, requires `ism_prices_paid.csv` for its full form; kept as-is |
-| `inflation_model_commodity_core_aux` (Inflation Model D) | Auxiliary/secondary | 2-signal only, FRED-native, but not one of the two named core models |
+| `inflation_model_cleveland_median_cpi` (Inflation Model C) | Auxiliary/research | Rejected as Primary's inflation axis after the challenger experiment; kept for research only |
+| `inflation_model_commodity_core_aux` (Inflation Model D) | Auxiliary/secondary | 2-signal only, FRED-native, but not part of Primary/Secondary |
 
 `build-signals` still cross-joins every active growth model with every
 active inflation model into its own `regime_*` column (per "Regime
 definition" above) -- these auxiliary combinations remain visible for
-research purposes, they are just not what "Model A" / "Model B" refers
-to.
+research purposes, they are just not Primary or Secondary.
+
+## Standard regime output (asset allocation)
+
+**This output is a revised-data backtest**, same as every other result in
+this project (see "Revised data vs. real-time (ALFRED) vintages" below):
+`growth_score`/`inflation_score`/`raw_regime` are computed from FRED's
+current, fully-revised values, not what was actually known on each
+historical date. Do not present `regime_output_*.csv` as a real-time/live
+track record.
+
+`build-regime-output` (also run as the last step of `run-all`) produces
+the asset-allocation-ready output for Primary and Secondary, written to
+`data/processed/regime_output_primary.csv` / `regime_output_secondary.csv`.
+Both files share an identical schema, computed directly from the frozen
+model functions (not re-derived from `signals.csv`):
+
+| Column | Meaning |
+|---|---|
+| `growth_score` | The growth model's own continuous score (US CLI: `chg_3m`; AMTMNO+Claims: `growth_score` from `growth_model_d_amtmno_claims`) |
+| `growth_state` | Up / Down / Unknown |
+| `inflation_score` | Core Inflation Momentum's `signal_raw` |
+| `inflation_state` | Up / Down / Unknown |
+| `raw_regime` | GOLDILOCKS / REFLATION / STAGFLATION / CONTRACTION / UNKNOWN, from `growth_state` x `inflation_state` (either axis Unknown -> UNKNOWN) |
+| `tradable_regime` | `raw_regime` shifted 1 calendar month forward (`regime_output.tradable_lag_months` in `config/default.yaml`, default 1) |
+
+**`tradable_regime` semantics:** `tradable_regime[t] = raw_regime[t-1]`.
+The regime computed from month `t`'s data is only applied to month
+`t+1`'s portfolio -- this is a **portfolio-application lag**, a
+conservative assumption that a regime call cannot be acted on until the
+following month. It is a *different* mechanism from FRED
+publication/availability lag (see "Look-ahead bias and effective dates"
+below): even if the underlying FRED data had zero publication delay,
+`tradable_regime` would still lag `raw_regime` by construction. The first
+month of any series has no prior `raw_regime` to reference and is always
+UNKNOWN. `raw_regime` itself is never modified by this process
+(`signals/regime.py::shift_to_tradable` returns a new Series).
+
+In practice, this 1-month portfolio-application lag also functions as a
+**rough, approximate stand-in for real FRED publication/availability
+lag**, since `evaluate()` / `build-signals` do not apply the
+`effective_date` machinery from `data/availability.py` (see "Look-ahead
+bias" below -- it exists and is unit-tested but is not wired into the
+live pipeline). `regime_output.tradable_lag_months: 1` roughly matches
+`lookahead.monthly_macro_lag_months: 1`, but the two are not the same
+mechanism and should not be assumed equivalent; treat `tradable_regime`
+as a conservative approximation, not a validated point-in-time backtest.
+
+**Do not treat Core Inflation Momentum as a strong short-term inflation
+predictor.** The audit at commit `40e43d7` found it to be, at best, a
+**weak predictive signal** (small, inconsistent edge over persistence and
+majority-class baselines, strongest at 6m) -- functionally it is closer
+to a **current-environment classifier**: it describes the recent
+inflation trend more reliably than it forecasts the next 3-6 months.
+Both Primary and Secondary inherit this limitation on their inflation
+axis; only the growth axis differs between them.
 
 ## Conference Board LEI vs. FRED USSLIND
 

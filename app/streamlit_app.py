@@ -34,6 +34,8 @@ SIGNALS_PATH = PROCESSED_DIR / "signals.csv"
 REGIME_METADATA_PATH = PROCESSED_DIR / "regime_metadata.json"
 EVAL_PATH = PROCESSED_DIR / "evaluation_report.json"
 SERIES_METADATA_PATH = PROCESSED_DIR / "series_metadata.json"
+REGIME_OUTPUT_PRIMARY_PATH = PROCESSED_DIR / "regime_output_primary.csv"
+REGIME_OUTPUT_SECONDARY_PATH = PROCESSED_DIR / "regime_output_secondary.csv"
 
 REGIME_COLORS = {
     Regime.GOLDILOCKS.value: "#2E7D32",
@@ -213,6 +215,61 @@ def page_regime_comparison(signals: pd.DataFrame | None, regime_meta: dict | Non
     st.dataframe(regime_durations(series), use_container_width=True)
 
 
+def _render_regime_output_column(label: str, df: pd.DataFrame | None) -> None:
+    st.subheader(label)
+    if df is None or df.empty:
+        st.info(f"{label} regime output not found. Run `build-regime-output` (or `run-all`).")
+        return
+
+    latest_date = df.index.max()
+    latest = df.loc[latest_date]
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Latest raw regime", str(latest["raw_regime"]))
+    with col2:
+        st.metric("Latest tradable regime", str(latest["tradable_regime"]))
+    st.caption(f"As of {latest_date.date()}")
+
+    st.markdown("**Last 24 months**")
+    cols = [
+        "growth_score",
+        "growth_state",
+        "inflation_score",
+        "inflation_state",
+        "raw_regime",
+        "tradable_regime",
+    ]
+    st.dataframe(df[cols].tail(24), use_container_width=True)
+
+    dist = regime_distribution(df["raw_regime"])
+    durations = regime_durations(df["raw_regime"])
+    avg_duration = (
+        durations.groupby("regime")["length_months"].mean().reindex([r.value for r in Regime]).fillna(0.0)
+        if not durations.empty
+        else pd.Series(0.0, index=[r.value for r in Regime])
+    )
+
+    st.markdown("**Regime frequency (raw_regime) and average spell duration**")
+    freq_table = pd.DataFrame({"frequency": dist, "avg_duration_months": avg_duration})
+    st.dataframe(freq_table, use_container_width=True)
+
+
+def page_regime_output(primary: pd.DataFrame | None, secondary: pd.DataFrame | None) -> None:
+    st.title("Regime Output")
+    st.caption(
+        "Standard asset-allocation regime output for the two frozen core "
+        "models (commit 40e43d7). Revised-data backtest -- see the "
+        "Methodology page for tradable_regime semantics and why Core "
+        "Inflation Momentum is treated as a current-environment classifier, "
+        "not a strong short-term predictor."
+    )
+    col1, col2 = st.columns(2)
+    with col1:
+        _render_regime_output_column("Primary (US OECD CLI x Core Inflation Momentum)", primary)
+    with col2:
+        _render_regime_output_column("Secondary (AMTMNO + Claims x Core Inflation Momentum)", secondary)
+
+
 def page_evaluation(eval_report: dict | None) -> None:
     st.title("Evaluation")
     if eval_report is None:
@@ -263,6 +320,8 @@ def main() -> None:
     regime_meta = _load_json(REGIME_METADATA_PATH)
     eval_report = _load_json(EVAL_PATH)
     series_meta = _load_json(SERIES_METADATA_PATH)
+    regime_output_primary = _load_csv(REGIME_OUTPUT_PRIMARY_PATH)
+    regime_output_secondary = _load_csv(REGIME_OUTPUT_SECONDARY_PATH)
 
     st.sidebar.title("macro-regime-taa")
     page = st.sidebar.radio(
@@ -273,6 +332,7 @@ def main() -> None:
             "Growth Models",
             "Inflation Models",
             "Regime Comparison",
+            "Regime Output",
             "Evaluation",
             "Methodology",
         ],
@@ -288,6 +348,8 @@ def main() -> None:
         page_inflation_models(signals)
     elif page == "Regime Comparison":
         page_regime_comparison(signals, regime_meta)
+    elif page == "Regime Output":
+        page_regime_output(regime_output_primary, regime_output_secondary)
     elif page == "Evaluation":
         page_evaluation(eval_report)
     elif page == "Methodology":

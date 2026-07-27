@@ -24,6 +24,7 @@ from macro_regime.evaluation.lead_lag import growth_forward_target, inflation_fo
 from macro_regime.evaluation.report import EvaluationReport, evaluate_model
 from macro_regime.signals.growth import (
     classify_growth_model_a,
+    cli_diagnostics,
     growth_model_b_fred_minimal,
     growth_model_c_simple_two_signal,
     growth_model_d_amtmno_claims,
@@ -34,7 +35,7 @@ from macro_regime.signals.inflation import (
     core_inflation_momentum,
     leading_inflation_composite,
 )
-from macro_regime.signals.regime import build_regime_series
+from macro_regime.signals.regime import build_regime_output, build_regime_series
 from macro_regime.utils.dates import normalize_month_end_index
 
 app = typer.Typer(add_completion=False, help="Growth/Inflation macro regime research CLI")
@@ -46,6 +47,8 @@ METADATA_PATH = PROCESSED_DIR / "series_metadata.json"
 SIGNALS_PATH = PROCESSED_DIR / "signals.csv"
 REGIME_METADATA_PATH = PROCESSED_DIR / "regime_metadata.json"
 EVAL_PATH = PROCESSED_DIR / "evaluation_report.json"
+REGIME_OUTPUT_PRIMARY_PATH = PROCESSED_DIR / "regime_output_primary.csv"
+REGIME_OUTPUT_SECONDARY_PATH = PROCESSED_DIR / "regime_output_secondary.csv"
 
 
 @app.command()
@@ -377,6 +380,107 @@ def evaluate() -> None:
     console.print(f"[green]Saved full report to {EVAL_PATH}[/green]")
 
 
+def _build_one_regime_output(
+    wide: pd.DataFrame,
+    config: dict,
+    *,
+    growth_model_key: str,
+    inflation_model_key: str,
+) -> pd.DataFrame:
+    """Compute growth_score/growth_state and inflation_score/inflation_state
+    directly from the frozen model functions (not from `_growth_signals` /
+    `_inflation_signals`, which only expose labels) and assemble the
+    standard regime-output schema. Only `model_a_cli`, `model_d_amtmno_claims`,
+    and `model_a_realized_core` are supported -- the two frozen core models."""
+    zconf = config["zscore"]
+    gmodels = config["growth_models"]
+    imodels = config["inflation_models"]
+
+    if growth_model_key == "model_a_cli":
+        g_conf = gmodels["model_a_cli"]
+        cli_series = wide[g_conf["us_series"]].dropna()
+        growth_score = normalize_month_end_index(
+            cli_diagnostics(cli_series)[f"chg_{g_conf['primary_window_months']}m"]
+        )
+        growth_state = normalize_month_end_index(
+            classify_growth_model_a(cli_series, primary_window=g_conf["primary_window_months"])
+        )
+    elif growth_model_key == "model_d_amtmno_claims":
+        g_conf = gmodels["model_d_amtmno_claims"]
+        amtmno = wide[g_conf["amtmno_series"]].dropna()
+        claims = wide[g_conf["claims_series"]].dropna()
+        df_g = growth_model_d_amtmno_claims(
+            amtmno,
+            claims,
+            amtmno_change_months=g_conf["amtmno_change_months"],
+            claims_change_months=g_conf["claims_change_months"],
+            zscore_window=zconf["rolling_window_months"],
+            zscore_min_periods=zconf["min_periods_months"],
+        )
+        growth_score = normalize_month_end_index(df_g["growth_score"])
+        growth_state = normalize_month_end_index(df_g["growth_label"])
+    else:
+        raise ValueError(f"Unsupported growth_model_key for regime output: {growth_model_key}")
+
+    if inflation_model_key == "model_a_realized_core":
+        i_conf = imodels["model_a_realized_core"]
+        core = wide[i_conf["core_series"]].dropna()
+        df_i = core_inflation_momentum(
+            core,
+            short_window_months=i_conf["short_window_months"],
+            long_window_months=i_conf["long_window_months"],
+        )
+        inflation_score = normalize_month_end_index(df_i["signal_raw"])
+        inflation_state = normalize_month_end_index(df_i["inflation_label"])
+    else:
+        raise ValueError(f"Unsupported inflation_model_key for regime output: {inflation_model_key}")
+
+    return build_regime_output(
+        growth_score,
+        growth_state,
+        inflation_score,
+        inflation_state,
+        tradable_lag_months=config["regime_output"]["tradable_lag_months"],
+    )
+
+
+@app.command("build-regime-output")
+def build_regime_output_cmd() -> None:
+    """Build the standard asset-allocation regime output for the two frozen
+    core models (Primary: US OECD CLI x Core Inflation Momentum; Secondary:
+    AMTMNO+Claims x Core Inflation Momentum) -- see `regime_output` in
+    config/default.yaml. Computed directly from `fred_wide.csv`; does not
+    read or modify `signals.csv` / `build-signals` / `evaluate` output."""
+    if not WIDE_PATH.exists():
+        console.print("[red]No fetched data found. Run `fetch` first.[/red]")
+        raise typer.Exit(code=1)
+
+    config = load_config()
+    wide = pd.read_csv(WIDE_PATH, index_col=0, parse_dates=True)
+    roconf = config["regime_output"]
+
+    primary = _build_one_regime_output(
+        wide,
+        config,
+        growth_model_key=roconf["primary"]["growth_model"],
+        inflation_model_key=roconf["primary"]["inflation_model"],
+    )
+    secondary = _build_one_regime_output(
+        wide,
+        config,
+        growth_model_key=roconf["secondary"]["growth_model"],
+        inflation_model_key=roconf["secondary"]["inflation_model"],
+    )
+
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    primary.to_csv(REGIME_OUTPUT_PRIMARY_PATH)
+    secondary.to_csv(REGIME_OUTPUT_SECONDARY_PATH)
+    console.print(
+        f"[green]Saved regime_output_primary.csv ({len(primary)} rows) and "
+        f"regime_output_secondary.csv ({len(secondary)} rows)[/green]"
+    )
+
+
 @app.command("run-all")
 def run_all(
     start_date: str = typer.Option(None, "--start-date"),
@@ -385,10 +489,11 @@ def run_all(
     growth_model: str = typer.Option("all", "--growth-model"),
     inflation_model: str = typer.Option("all", "--inflation-model"),
 ) -> None:
-    """Run fetch -> build-signals -> evaluate end to end."""
+    """Run fetch -> build-signals -> evaluate -> build-regime-output end to end."""
     fetch(start_date=start_date, end_date=end_date, refresh_cache=refresh_cache)
     build_signals(growth_model=growth_model, inflation_model=inflation_model)
     evaluate()
+    build_regime_output_cmd()
 
 
 if __name__ == "__main__":

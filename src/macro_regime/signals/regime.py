@@ -84,6 +84,48 @@ def regime_durations(regime_series: pd.Series) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def shift_to_tradable(raw_regime: pd.Series, *, lag_months: int = 1) -> pd.Series:
+    """tradable_regime[t] = raw_regime[t - lag_months]: the regime known at
+    month t is only actionable starting `lag_months` later. The first
+    `lag_months` rows have no prior raw_regime to reference and are
+    UNKNOWN. Positional shift (matches `diff_n`/`rolling_zscore` elsewhere
+    in this project), so it assumes a gap-free monthly index. Returns a new
+    Series -- `raw_regime` itself is never mutated.
+    """
+    shifted = raw_regime.shift(lag_months)
+    return shifted.fillna(Regime.UNKNOWN.value).rename("tradable_regime")
+
+
+def build_regime_output(
+    growth_score: pd.Series,
+    growth_state: pd.Series,
+    inflation_score: pd.Series,
+    inflation_state: pd.Series,
+    *,
+    tradable_lag_months: int = 1,
+) -> pd.DataFrame:
+    """Standard asset-allocation regime output for one growth x inflation
+    model pair: growth_score, growth_state, inflation_score,
+    inflation_state, raw_regime, tradable_regime. `tradable_regime` is
+    `raw_regime` shifted `tradable_lag_months` forward (see
+    `shift_to_tradable`) -- it is the only column derived from another;
+    every other column is the model's own signal, unmodified.
+    """
+    raw_regime = build_regime_series(growth_state, inflation_state, name="raw_regime")
+    tradable_regime = shift_to_tradable(raw_regime, lag_months=tradable_lag_months)
+    return pd.concat(
+        [
+            growth_score.rename("growth_score"),
+            growth_state.rename("growth_state"),
+            inflation_score.rename("inflation_score"),
+            inflation_state.rename("inflation_state"),
+            raw_regime,
+            tradable_regime,
+        ],
+        axis=1,
+    )
+
+
 def transition_matrix(regime_series: pd.Series) -> pd.DataFrame:
     """Row-normalized regime-to-regime transition probability matrix."""
     clean = regime_series.dropna()

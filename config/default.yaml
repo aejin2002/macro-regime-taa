@@ -93,6 +93,22 @@ growth_basket:
   sp500_weight: 0.5
   kospi200_weight: 0.5
 
+# Standard asset-allocation regime output. Frozen as of commit 40e43d7 --
+# no further indicator search or formula tuning. Both use Core Inflation
+# Momentum (model_a_realized_core) as the shared inflation axis; see
+# docs/methodology.md for why it is treated as a current-environment
+# classifier, not a strong short-term predictor. Cleveland Median CPI and
+# the commodity+core auxiliary model are explicitly excluded here -- they
+# remain auxiliary/research-only, never promoted into this output.
+regime_output:
+  primary:
+    growth_model: "model_a_cli"
+    inflation_model: "model_a_realized_core"
+  secondary:
+    growth_model: "model_d_amtmno_claims"
+    inflation_model: "model_a_realized_core"
+  tradable_lag_months: 1
+
 zscore:
   min_periods_months: 60
   rolling_window_months: 120

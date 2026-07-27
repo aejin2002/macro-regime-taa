@@ -10,15 +10,15 @@
 | `ICSA` | Initial Claims | Weekly | Number | Growth Models B/C/D input |
 | `PERMIT` | New Private Housing Units Authorized by Building Permits | Monthly | Thousands | Growth Model B input |
 | `USPHCI` | Coincident Economic Activity Index, US | Monthly | Index | Growth confirmation |
-| `USALOLITOAASTSAM` | OECD CLI, United States, Amplitude Adjusted | Monthly | Index | Growth Model A input (US only -- no Korea CLI, no separate KR regime); **core Model A growth axis** |
-| `AMTMNO` | Manufacturers' New Orders: Total Manufacturing | Monthly | Millions of Dollars | Growth Model D input; **core Model B growth axis** (fully FRED-native replacement for ISM New Orders) |
-| `CPILFESL` | Core CPI, Seasonally Adjusted | Monthly | Index | Inflation Models A/B/D input, inflation target; Model A is the **core Model B inflation axis** |
+| `USALOLITOAASTSAM` | OECD CLI, United States, Amplitude Adjusted | Monthly | Index | Growth Model A input (US only -- no Korea CLI, no separate KR regime); **Primary growth axis** |
+| `AMTMNO` | Manufacturers' New Orders: Total Manufacturing | Monthly | Millions of Dollars | Growth Model D input; **Secondary growth axis** (fully FRED-native replacement for ISM New Orders) |
+| `CPILFESL` | Core CPI, Seasonally Adjusted | Monthly | Index | Inflation Models A/B/D input, inflation target; Model A is the **Primary and Secondary inflation axis** (frozen as of `40e43d7`; see Methodology re: current-environment classifier, not a strong short-term predictor) |
 | `PCEPILFE` | Core PCE Price Index | Monthly | Index | Alternate inflation core series |
 | `CPIAUCSL` | Headline CPI, Seasonally Adjusted | Monthly | Index | Diagnostic |
 | `T10Y3M` | 10Y minus 3M Treasury | Daily | Percent | Diagnostic (yield curve) |
 | `T10Y2Y` | 10Y minus 2Y Treasury | Daily | Percent | Diagnostic (yield curve) |
 | `T5YIE` | 5-Year Breakeven Inflation Rate | Daily | Percent | Inflation Model B input |
-| `MEDCPIM158SFRBCLE` | Median CPI (Cleveland Fed) | Monthly | Percent | Inflation Model C input -- underlying-inflation trend signal, **not** the Cleveland Fed Inflation Nowcast; **core Model A inflation axis** |
+| `MEDCPIM158SFRBCLE` | Median CPI (Cleveland Fed) | Monthly | Percent | Inflation Model C input -- underlying-inflation trend signal, **not** the Cleveland Fed Inflation Nowcast; **auxiliary/research only**, rejected as Primary's inflation axis after a challenger experiment (see Methodology) |
 | `PALLFNFINDEXM` | Global Price Index of All Commodities (IMF) | Monthly | Index | Inflation Model D input (auxiliary/secondary, 2-signal only -- see Methodology) |
 
 All series are validated against the live FRED API at fetch time
@@ -76,3 +76,4 @@ excluded but outputs are local-only build products, not committed)
 | `growth_model_b_detail.csv`, `growth_model_c_detail.csv`, `growth_model_d_detail.csv` | `build-signals` | Component-level growth model diagnostics |
 | `inflation_model_a_detail.csv`, `inflation_model_b_detail.csv`, `inflation_model_c_detail.csv`, `inflation_model_d_detail.csv` | `build-signals` | Component-level inflation model diagnostics |
 | `evaluation_report.json` | `evaluate` | Full per-model, per-horizon evaluation results vs. naive baselines |
+| `regime_output_primary.csv`, `regime_output_secondary.csv` | `build-regime-output` | Standard asset-allocation output for the two frozen core models: `growth_score`, `growth_state`, `inflation_score`, `inflation_state`, `raw_regime`, `tradable_regime` (see Methodology, "Standard regime output") |
