@@ -3,11 +3,13 @@
 Macro regime research engine using growth and inflation signals for
 tactical asset allocation (TAA).
 
-This project is **not** a full asset-allocation or backtesting system. It
-is Layer 1 of a TAA process: classifying and evaluating the US
-Growth x Inflation macro regime. See `docs/methodology.md` for the full
-research write-up and `docs/data_dictionary.md` for every data source and
-schema used.
+This project's core deliverable is Layer 1 of a TAA process: classifying
+and evaluating the US Growth x Inflation macro regime. As of v1.0 it also
+includes a fixed-regime **asset allocation backtest** (see "Backtest"
+below) -- a fixed, ex-ante allocation applied to `tradable_regime`, not
+an optimized or actively-managed trading system. See
+`docs/methodology.md` for the full research write-up and
+`docs/data_dictionary.md` for every data source and schema used.
 
 ## Purpose
 
@@ -52,25 +54,26 @@ Secondary without an explicit decision to unfreeze them.
 ## Growth Asset Basket
 
 When the growth axis is "Up", it is expressed as a single fixed-weight
-basket rather than a country-specific asset pick:
-
-- S&P 500
-- KOSPI 200
-
-There is no separate KOSPI-oriented regime -- KOSPI 200 is a constituent
-of this one basket, allocated against the same US Growth x US Inflation
-regime as the S&P 500. Weights are configured under `growth_basket` in
-`config/default.yaml`:
+basket rather than a country-specific asset pick: **SPY 60% + KODEX 200
+ETF (`069500.KS`) 40%, USD-converted returns.** There is no separate
+KOSPI-oriented regime -- KOSPI 200 exposure (via the KODEX 200 ETF, a
+real KOSPI-200-tracking fund) is a constituent of this one basket,
+allocated against the same US Growth x US Inflation regime as SPY.
+Configured under `growth_basket` in `config/default.yaml`:
 
 ```yaml
 growth_basket:
-  sp500_weight: 0.5
-  kospi200_weight: 0.5
+  spy_weight: 0.6
+  kodex200_weight: 0.4
+  kodex200_ticker: "069500.KS"
+  fx_ticker: "KRW=X"
 ```
 
-The default is an untuned 50:50 split. This build does not compute
-basket returns, backtest the weights, or optimize them -- that is future
-work layered on top of this regime engine (see Future plans below).
+KODEX 200 is KRW-denominated; its USD-equivalent return is computed
+using the **actual month-end** USD/KRW rate (`KRW=X`) only -- never
+predicted, hedged, or filled forward. This fixed 60/40 split is used
+exactly as configured, not optimized -- see `docs/methodology.md`,
+"Backtest", for the full rebalancing rules and FX methodology.
 
 ## Installation
 
@@ -182,6 +185,40 @@ publication lag. See `docs/methodology.md`, "Standard regime output",
 for the full semantics and caveats (revised-data backtest, Core
 Inflation Momentum as a current-environment classifier).
 
+## Backtest (v1.0, fixed-regime asset allocation)
+
+`run-backtest` applies fixed, ex-ante regime allocations to Primary's and
+Secondary's `tradable_regime` (only `tradable_regime`, never
+`raw_regime`), and compares against Static 60/40, Static equal-weight,
+and Growth Basket buy-and-hold. **Weights are used exactly as specified
+-- nothing is optimized, fit to data, or threshold-tuned. No
+Rate/Credit/Crisis overlay in this version.**
+
+Asset prices come from Yahoo Finance (`yfinance`) -- the only asset-price
+source in this repo; there is no existing internal price infrastructure
+to reuse. **The common backtest sample starts 2009-05**, not the
+BIL-inception-driven ~2007-06 originally expected: `069500.KS` (KODEX
+200) has a real Yahoo Finance data gap from 2007-03 through 2009-03
+(data resumes 2009-04), and the no-forward-fill rule means the common
+sample can't begin until that gap clears. **2008 (GFC) is therefore not
+covered by this backtest** -- only 2020 and 2022 of the three requested
+crisis years are (see `docs/methodology.md`, "Backtest", for the full
+finding). Monthly rebalance to target every month (restoring full target
+weights even when unchanged), one-way turnover x
+`backtest.transaction_cost_bps` (10bp) transaction cost, every metric
+reported pre-cost and post-cost.
+
+```bash
+python -m macro_regime.cli run-backtest
+```
+
+Writes `data/processed/backtest_summary.csv`,
+`backtest_annual_returns.csv`, `backtest_monthly_returns.csv`,
+`backtest_allocations_primary.csv`, `backtest_allocations_secondary.csv`,
+`backtest_regime_analysis.csv`. Not chained into `run-all` (separate,
+slower, independently-cached network source) -- run it after
+`build-regime-output`.
+
 ## Running the pipeline
 
 ```bash
@@ -197,6 +234,7 @@ python -m macro_regime.cli fetch --start-date 1990-01-01
 python -m macro_regime.cli build-signals --growth-model all --inflation-model all
 python -m macro_regime.cli evaluate
 python -m macro_regime.cli build-regime-output
+python -m macro_regime.cli run-backtest
 python -m macro_regime.cli run-all   # fetch -> build-signals -> evaluate -> build-regime-output
 ```
 
@@ -211,9 +249,9 @@ make app
 ```
 
 Pages: Overview, Data Explorer, Growth Models, Inflation Models, Regime
-Comparison, Regime Output, Evaluation, Methodology. Run `make run-all`
-(or the CLI commands above) at least once before launching the app so
-`data/processed/*` exists.
+Comparison, Regime Output, Backtest, Evaluation, Methodology. Run `make
+run-all` and `run-backtest` (or the CLI commands above) at least once
+before launching the app so `data/processed/*` exists.
 
 ## Tests and linting
 
@@ -253,18 +291,23 @@ gap is closed.
   calendar.
 - Average lead-time diagnostic is a simple cross-correlation heuristic,
   not a formal causality test.
-- No asset returns, position sizing, or trading backtest in this version
-  -- by design; see Future plans.
+- The backtest's common sample starts ~2007 (driven by `BIL`'s
+  inception), not the full 1990+ macro-signal history; no ETF
+  survivorship-bias modeling.
+- No Rate/Credit/Crisis overlay in the backtest yet -- see Future plans.
+- Past backtest performance does not represent live/real-time
+  performance.
 
 ## Future plans
 
-Layered on top of this regime engine, not yet implemented:
+Layered on top of this regime engine and backtest, not yet implemented:
 
 - **Rate Overlay** -- yield-curve / policy-rate risk adjustment
 - **Credit Overlay** -- credit-spread confirmation of the growth call
 - **Price Confirmation** -- price/momentum filter before acting on a regime
 - **Crisis Gate** -- tail-risk override to suspend normal regime logic
   during acute stress
-- **Growth Asset Basket weight optimization** -- the S&P 500 / KOSPI 200
-  split in `growth_basket` (`config/default.yaml`) is a fixed, untuned
-  50:50 default; backtesting and optimizing that split is future work
+- **Allocation weight optimization** -- the fixed regime allocation
+  tables and the 60/40 SPY/KODEX200 Growth Basket split
+  (`config/default.yaml`) are used exactly as specified, untuned;
+  backtesting and optimizing those weights is future work

@@ -276,6 +276,128 @@ inflation trend more reliably than it forecasts the next 3-6 months.
 Both Primary and Secondary inherit this limitation on their inflation
 axis; only the growth axis differs between them.
 
+## Backtest (v1.0, fixed-regime asset allocation)
+
+`run-backtest` turns Primary's and Secondary's `tradable_regime` (only
+`tradable_regime` -- `raw_regime` is never used for return computation)
+into an actual fixed-weight portfolio, and compares it against three
+static benchmarks. **This is a fixed, ex-ante allocation: the weights
+below were specified in advance and are used exactly as given -- nothing
+in this backtest is optimized, fit to data, or threshold-tuned.** No
+Rate/Credit/Crisis overlay exists in this version (explicitly deferred).
+
+### Growth Asset Basket
+
+**SPY 60% + KODEX 200 ETF (`069500.KS`) 40%, USD-converted returns.**
+KODEX 200 is a real KOSPI-200-tracking fund (Yahoo Finance ticker
+`069500.KS`), KRW-denominated -- not a USD proxy like an MSCI-Korea ETF.
+Its USD-equivalent return combines the fund's own KRW return with the
+USD/KRW move over the same month:
+
+```
+KODEX_USD_price_t = KODEX_KRW_price_t / USDKRW_t   (USDKRW from Yahoo Finance "KRW=X")
+```
+
+Only the **actual month-end** `KRW=X` rate is ever used -- never
+predicted, averaged, hedged, or filled forward with a later rate. This
+project implements no other FX model; if `069500.KS` or `KRW=X` ever
+becomes unfetchable, the backtest must stop rather than silently
+substitute a USD proxy (this was a hard constraint during development,
+not just a preference).
+
+The 60/40 split is **rebalanced monthly** wherever "Growth Basket"
+appears inside a regime/static/equal-weight strategy (its internal
+turnover and transaction cost count toward that strategy's total). The
+standalone **"Growth Basket buy-and-hold" comparison strategy is true
+buy-and-hold**: bought once at 60/40, never rebalanced again, zero
+turnover after month 0.
+
+### Fixed regime allocations
+
+Exactly as specified (`backtest.regime_allocations` in
+`config/default.yaml`), all rows sum to 100%:
+
+| | Growth Basket | High Yield | Inv. Grade | Interm. Treas. | Long Treas. | Gold | T-bills | Commodities | TIPS |
+|---|---|---|---|---|---|---|---|---|---|
+| GOLDILOCKS | 60% | 10% | 10% | 10% | -- | 5% | 5% | -- | -- |
+| REFLATION | 40% | 10% | -- | -- | -- | 10% | 5% | 20% | 15% |
+| STAGFLATION | 10% | -- | -- | -- | -- | 25% | 20% | 25% | 20% |
+| CONTRACTION | -- | -- | 15% | 20% | 35% | 10% | 20% | -- | -- |
+| UNKNOWN | -- | -- | -- | -- | -- | -- | 100% | -- | -- |
+
+Underlying tickers: High Yield=`HYG`, Investment Grade=`LQD`,
+Intermediate Treasury=`IEF`, Long Treasury=`TLT`, Gold=`GLD`,
+T-bills=`BIL`, Commodities=`DBC`, TIPS=`TIP` (`backtest.assets` in
+config).
+
+### Comparison strategies
+
+- **Primary** / **Secondary** -- regime allocation driven by each
+  model's `tradable_regime`.
+- **Static 60/40** -- Growth Basket 60% + Intermediate Treasury 40%,
+  rebalanced monthly (constant target, not "no rebalancing").
+- **Static equal-weight** -- 1/9 each across the 9 distinct categories
+  named anywhere in the regime tables above (Growth Basket counted once,
+  not as two slots), rebalanced monthly. This 1/9 definition was not
+  specified further upstream and is documented here as an explicit
+  choice, not hidden.
+- **Growth Basket buy-and-hold** -- 100% Growth Basket, bought once,
+  never rebalanced (see above).
+
+### Mechanics
+
+- **Monthly rebalance to target, every month**, even when the target is
+  unchanged from the prior month (regime strategies restore full target
+  weights on schedule, not only on a regime change).
+- Month `t`'s portfolio return uses only the weights entering month `t`
+  (decided from `tradable_regime[t]` or the constant static target) and
+  month `t`'s realized asset returns -- never a later month's regime or
+  price.
+- **Turnover** = sum(|target weight - drifted prior weight|) / 2 ("one-way"),
+  applied uniformly including the very first rebalance (implicit
+  all-cash prior state).
+- **Transaction cost** = turnover x `backtest.transaction_cost_bps`
+  (10bp), deducted from the same month's return it was incurred to
+  enter. Every metric is reported **pre-cost and post-cost** side by
+  side; post-cost cumulative value is checked to never exceed pre-cost
+  (`tests/test_backtest.py`).
+- **Risk-free rate** (Sharpe/Sortino): the realized monthly return of
+  `BIL` (already in the universe), not an arbitrary constant -- also an
+  explicit, undirected choice, documented rather than hidden.
+
+### Common sample and data limitations
+
+Monthly returns are built from each ticker's Yahoo-Finance adjusted
+close (`auto_adjust=True`, split+dividend-adjusted = total-return
+equivalent), resampled to month-end using the **last known trading-day
+close within the month only** -- a month with no data produces `NaN`
+and is never forward- or backward-filled across the gap
+(`utils/dates.py::resample_to_monthly`, reused as-is).
+
+**The backtest starts at the first month-end where every asset in the
+universe has a real return -- not the 1990+ history used by the macro
+signals.** All 9 US-listed tickers have data by 2007-05 (`BIL`'s
+inception, the latest of the nine). **The actual binding constraint,
+discovered when this backtest was first run, is a real gap in Yahoo
+Finance's `069500.KS` (KODEX 200) history: data exists for 2007-01 and
+2007-02, then is completely missing from 2007-03 through 2009-03, then
+resumes 2009-04 onward.** Per the no-forward-fill rule, that gap is
+never bridged, so the common sample begins **2009-05** (the first month
+with a valid month-over-month return for every asset) -- **not** ~2007
+as a BIL-only inception check would suggest. This means **2008 (GFC) is
+not covered by this backtest's common sample** -- only 2020 and 2022 of
+the three requested crisis years are; `backtest_annual_returns.csv` /
+`backtest_regime_analysis.csv` correctly omit 2008 rather than
+fabricating them. This build does **not** model ETF survivorship bias
+(each fund's full available history as currently listed is used; no
+adjustment for funds that may have closed or merged elsewhere in the
+industry).
+
+**Past performance in this backtest does not represent live or
+real-time performance** -- it is a revised-regime, historical-price
+backtest with a 1-month portfolio-application lag approximation, not a
+tracked, executed strategy.
+
 ## Conference Board LEI vs. FRED USSLIND
 
 `USSLIND` on FRED is the **Philadelphia Fed's State Leading Indexes**

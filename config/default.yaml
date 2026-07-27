@@ -86,12 +86,17 @@ inflation_models:
 # Growth Asset Basket: the regime engine above classifies a single US
 # Growth x US Inflation regime (see docs/methodology.md). When the growth
 # axis is "Up", it is spent on this fixed-weight basket rather than a
-# single asset or a separate per-country regime. Weights are a structural
-# default only -- not tuned or backtested in this build; see "Planned
-# future layers" in docs/methodology.md.
+# single asset or a separate per-country regime. Finalized for the v1.0
+# backtest: SPY 60% + KODEX 200 ETF (069500.KS, a real KOSPI 200-tracking
+# fund, KRW-denominated) 40%, converted to USD via month-end KRW=X.
+# Rebalanced monthly wherever used inside a regime/static/equal-weight
+# strategy; NOT rebalanced in the standalone "Growth Basket buy-and-hold"
+# comparison strategy (see docs/methodology.md, "Backtest").
 growth_basket:
-  sp500_weight: 0.5
-  kospi200_weight: 0.5
+  spy_weight: 0.6
+  kodex200_weight: 0.4
+  kodex200_ticker: "069500.KS"
+  fx_ticker: "KRW=X"
 
 # Standard asset-allocation regime output. Frozen as of commit 40e43d7 --
 # no further indicator search or formula tuning. Both use Core Inflation
@@ -108,6 +113,57 @@ regime_output:
     growth_model: "model_d_amtmno_claims"
     inflation_model: "model_a_realized_core"
   tradable_lag_months: 1
+
+# v1.0 fixed-regime asset allocation backtest. Weights below are used
+# exactly as given -- not optimized, not fit to data. See
+# docs/methodology.md, "Backtest", for the full ruleset (monthly
+# rebalance to target, one-way turnover x transaction_cost_bps,
+# tradable_regime-only, common-start-date, no-forward-fill).
+backtest:
+  transaction_cost_bps: 10
+  risk_free_asset: "tbills"
+  assets:
+    spy: "SPY"
+    high_yield: "HYG"
+    investment_grade: "LQD"
+    intermediate_treasury: "IEF"
+    long_treasury: "TLT"
+    gold: "GLD"
+    tbills: "BIL"
+    commodities: "DBC"
+    tips: "TIP"
+  regime_allocations:
+    GOLDILOCKS:
+      growth_basket: 0.60
+      high_yield: 0.10
+      investment_grade: 0.10
+      intermediate_treasury: 0.10
+      gold: 0.05
+      tbills: 0.05
+    REFLATION:
+      growth_basket: 0.40
+      commodities: 0.20
+      tips: 0.15
+      gold: 0.10
+      high_yield: 0.10
+      tbills: 0.05
+    STAGFLATION:
+      growth_basket: 0.10
+      commodities: 0.25
+      gold: 0.25
+      tips: 0.20
+      tbills: 0.20
+    CONTRACTION:
+      long_treasury: 0.35
+      intermediate_treasury: 0.20
+      investment_grade: 0.15
+      tbills: 0.20
+      gold: 0.10
+    UNKNOWN:
+      tbills: 1.00
+  static_6040:
+    growth_basket: 0.60
+    intermediate_treasury: 0.40
 
 zscore:
   min_periods_months: 60

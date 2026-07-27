@@ -36,6 +36,12 @@ EVAL_PATH = PROCESSED_DIR / "evaluation_report.json"
 SERIES_METADATA_PATH = PROCESSED_DIR / "series_metadata.json"
 REGIME_OUTPUT_PRIMARY_PATH = PROCESSED_DIR / "regime_output_primary.csv"
 REGIME_OUTPUT_SECONDARY_PATH = PROCESSED_DIR / "regime_output_secondary.csv"
+BACKTEST_SUMMARY_PATH = PROCESSED_DIR / "backtest_summary.csv"
+BACKTEST_ANNUAL_RETURNS_PATH = PROCESSED_DIR / "backtest_annual_returns.csv"
+BACKTEST_MONTHLY_RETURNS_PATH = PROCESSED_DIR / "backtest_monthly_returns.csv"
+BACKTEST_ALLOCATIONS_PRIMARY_PATH = PROCESSED_DIR / "backtest_allocations_primary.csv"
+BACKTEST_ALLOCATIONS_SECONDARY_PATH = PROCESSED_DIR / "backtest_allocations_secondary.csv"
+BACKTEST_REGIME_ANALYSIS_PATH = PROCESSED_DIR / "backtest_regime_analysis.csv"
 
 REGIME_COLORS = {
     Regime.GOLDILOCKS.value: "#2E7D32",
@@ -53,6 +59,15 @@ def _load_csv(path: Path) -> pd.DataFrame | None:
     if not path.exists():
         return None
     return pd.read_csv(path, index_col=0, parse_dates=True)
+
+
+@st.cache_data
+def _load_csv_plain(path: Path) -> pd.DataFrame | None:
+    """Like `_load_csv`, but for CSVs with no date index (e.g. summary /
+    long-format tables written with `index=False`)."""
+    if not path.exists():
+        return None
+    return pd.read_csv(path)
 
 
 @st.cache_data
@@ -270,6 +285,92 @@ def page_regime_output(primary: pd.DataFrame | None, secondary: pd.DataFrame | N
         _render_regime_output_column("Secondary (AMTMNO + Claims x Core Inflation Momentum)", secondary)
 
 
+def page_backtest(
+    summary: pd.DataFrame | None,
+    annual_returns: pd.DataFrame | None,
+    monthly_returns: pd.DataFrame | None,
+    allocations_primary: pd.DataFrame | None,
+    allocations_secondary: pd.DataFrame | None,
+    regime_analysis: pd.DataFrame | None,
+) -> None:
+    st.title("Backtest")
+    if summary is None or monthly_returns is None:
+        st.warning(
+            "Backtest output not found. Run `python -m macro_regime.cli "
+            "run-backtest` (after `build-regime-output`)."
+        )
+        return
+
+    st.caption(
+        "Fixed ex-ante regime allocation -- weights are not optimized or "
+        "fit to data. Regime classification is a revised-FRED-data "
+        "backtest; asset/FX prices are actual historical closes, but this "
+        "is still not a real-time track record. 1-month "
+        "portfolio-application lag via tradable_regime. Common sample "
+        "starts 2009-05, driven by a real Yahoo Finance data gap in "
+        "069500.KS (KODEX 200) from 2007-03 to 2009-03, not by BIL's "
+        "~2007 inception -- 2008 (GFC) is therefore not covered, only "
+        "2020 and 2022. See the Methodology page, 'Backtest', for full "
+        "caveats."
+    )
+
+    st.subheader("Strategy performance (post-cost)")
+    display_cols = [
+        "strategy",
+        "start_date",
+        "end_date",
+        "cagr_post_cost",
+        "annualized_vol_post_cost",
+        "sharpe_post_cost",
+        "sortino_post_cost",
+        "max_drawdown_post_cost",
+        "calmar_post_cost",
+        "monthly_win_rate",
+        "annual_positive_year_ratio",
+        "avg_annual_turnover",
+        "final_value_post_cost",
+    ]
+    st.dataframe(summary[[c for c in display_cols if c in summary.columns]], use_container_width=True)
+    with st.expander("Full summary (pre-cost vs. post-cost)"):
+        st.dataframe(summary, use_container_width=True)
+
+    cumulative = (1 + monthly_returns.fillna(0)).cumprod()
+    st.subheader("Cumulative return (post-cost, starts at 1.0)")
+    fig_cum = go.Figure()
+    for col in cumulative.columns:
+        fig_cum.add_trace(go.Scatter(x=cumulative.index, y=cumulative[col], mode="lines", name=col))
+    st.plotly_chart(fig_cum, use_container_width=True)
+
+    st.subheader("Drawdown from running peak")
+    drawdown = cumulative / cumulative.cummax() - 1.0
+    fig_dd = go.Figure()
+    for col in drawdown.columns:
+        fig_dd.add_trace(go.Scatter(x=drawdown.index, y=drawdown[col], mode="lines", name=col))
+    st.plotly_chart(fig_dd, use_container_width=True)
+
+    if annual_returns is not None:
+        st.subheader("Annual returns")
+        st.dataframe(annual_returns, use_container_width=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Primary: last 24 months")
+        if allocations_primary is not None:
+            st.dataframe(allocations_primary.tail(24), use_container_width=True)
+    with col2:
+        st.subheader("Secondary: last 24 months")
+        if allocations_secondary is not None:
+            st.dataframe(allocations_secondary.tail(24), use_container_width=True)
+
+    if regime_analysis is not None:
+        st.subheader("Primary vs. Secondary")
+        agreement = regime_analysis[regime_analysis["analysis_type"] == "primary_secondary_agreement_rate"]
+        if not agreement.empty:
+            st.metric("tradable_regime agreement rate", f"{float(agreement['value'].iloc[0]):.1%}")
+        with st.expander("Regime-average returns / crisis-year performance (full table)"):
+            st.dataframe(regime_analysis, use_container_width=True)
+
+
 def page_evaluation(eval_report: dict | None) -> None:
     st.title("Evaluation")
     if eval_report is None:
@@ -322,6 +423,12 @@ def main() -> None:
     series_meta = _load_json(SERIES_METADATA_PATH)
     regime_output_primary = _load_csv(REGIME_OUTPUT_PRIMARY_PATH)
     regime_output_secondary = _load_csv(REGIME_OUTPUT_SECONDARY_PATH)
+    backtest_summary = _load_csv_plain(BACKTEST_SUMMARY_PATH)
+    backtest_annual_returns = _load_csv(BACKTEST_ANNUAL_RETURNS_PATH)
+    backtest_monthly_returns = _load_csv(BACKTEST_MONTHLY_RETURNS_PATH)
+    backtest_allocations_primary = _load_csv(BACKTEST_ALLOCATIONS_PRIMARY_PATH)
+    backtest_allocations_secondary = _load_csv(BACKTEST_ALLOCATIONS_SECONDARY_PATH)
+    backtest_regime_analysis = _load_csv_plain(BACKTEST_REGIME_ANALYSIS_PATH)
 
     st.sidebar.title("macro-regime-taa")
     page = st.sidebar.radio(
@@ -333,6 +440,7 @@ def main() -> None:
             "Inflation Models",
             "Regime Comparison",
             "Regime Output",
+            "Backtest",
             "Evaluation",
             "Methodology",
         ],
@@ -350,6 +458,15 @@ def main() -> None:
         page_regime_comparison(signals, regime_meta)
     elif page == "Regime Output":
         page_regime_output(regime_output_primary, regime_output_secondary)
+    elif page == "Backtest":
+        page_backtest(
+            backtest_summary,
+            backtest_annual_returns,
+            backtest_monthly_returns,
+            backtest_allocations_primary,
+            backtest_allocations_secondary,
+            backtest_regime_analysis,
+        )
     elif page == "Evaluation":
         page_evaluation(eval_report)
     elif page == "Methodology":

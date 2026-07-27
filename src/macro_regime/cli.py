@@ -9,6 +9,26 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from macro_regime.backtest.allocations import (
+    equal_weight_allocation,
+    growth_basket_allocation,
+    regime_allocations,
+    static_6040_allocation,
+)
+from macro_regime.backtest.assets import build_monthly_return_matrix
+from macro_regime.backtest.engine import (
+    StrategyResult,
+    run_buy_and_hold_strategy,
+    run_regime_strategy,
+    run_static_strategy,
+)
+from macro_regime.backtest.metrics import (
+    annual_returns_table,
+    build_summary_table,
+    crisis_period_performance,
+    regime_agreement_rate,
+    regime_average_returns,
+)
 from macro_regime.config import PROJECT_ROOT, MissingApiKeyError, load_config
 from macro_regime.data.csv_loader import load_ism_new_orders, load_ism_prices_paid
 from macro_regime.data.fred_client import FredClient
@@ -49,6 +69,12 @@ REGIME_METADATA_PATH = PROCESSED_DIR / "regime_metadata.json"
 EVAL_PATH = PROCESSED_DIR / "evaluation_report.json"
 REGIME_OUTPUT_PRIMARY_PATH = PROCESSED_DIR / "regime_output_primary.csv"
 REGIME_OUTPUT_SECONDARY_PATH = PROCESSED_DIR / "regime_output_secondary.csv"
+BACKTEST_SUMMARY_PATH = PROCESSED_DIR / "backtest_summary.csv"
+BACKTEST_ANNUAL_RETURNS_PATH = PROCESSED_DIR / "backtest_annual_returns.csv"
+BACKTEST_MONTHLY_RETURNS_PATH = PROCESSED_DIR / "backtest_monthly_returns.csv"
+BACKTEST_ALLOCATIONS_PRIMARY_PATH = PROCESSED_DIR / "backtest_allocations_primary.csv"
+BACKTEST_ALLOCATIONS_SECONDARY_PATH = PROCESSED_DIR / "backtest_allocations_secondary.csv"
+BACKTEST_REGIME_ANALYSIS_PATH = PROCESSED_DIR / "backtest_regime_analysis.csv"
 
 
 @app.command()
@@ -479,6 +505,119 @@ def build_regime_output_cmd() -> None:
         f"[green]Saved regime_output_primary.csv ({len(primary)} rows) and "
         f"regime_output_secondary.csv ({len(secondary)} rows)[/green]"
     )
+
+
+@app.command("run-backtest")
+def run_backtest_cmd(
+    refresh_cache: bool = typer.Option(False, "--refresh-cache"),
+) -> None:
+    """Run the v1.0 fixed-regime asset allocation backtest. Fetches asset
+    and FX prices from Yahoo Finance (yfinance) -- a separate, slower,
+    independently-cached network call from the FRED pipeline, so this is
+    not chained into `run-all`. Requires `build-regime-output` to have
+    already produced `regime_output_primary.csv` / `regime_output_secondary.csv`.
+    Weights are used exactly as configured in `backtest.regime_allocations`
+    -- nothing here is optimized or fit to data."""
+    if not REGIME_OUTPUT_PRIMARY_PATH.exists() or not REGIME_OUTPUT_SECONDARY_PATH.exists():
+        console.print("[red]Missing regime output. Run `build-regime-output` first.[/red]")
+        raise typer.Exit(code=1)
+
+    config = load_config()
+    primary_df = pd.read_csv(REGIME_OUTPUT_PRIMARY_PATH, index_col=0, parse_dates=True)
+    secondary_df = pd.read_csv(REGIME_OUTPUT_SECONDARY_PATH, index_col=0, parse_dates=True)
+    primary_regime = primary_df["tradable_regime"]
+    secondary_regime = secondary_df["tradable_regime"]
+
+    console.print("[cyan]Fetching asset + FX prices from Yahoo Finance...[/cyan]")
+    asset_returns, common_start = build_monthly_return_matrix(config, refresh_cache=refresh_cache)
+    console.print(f"[green]Common backtest start date: {common_start.date()}[/green]")
+
+    bconf = config["backtest"]
+    cost_bps = bconf["transaction_cost_bps"]
+    risk_free_returns = asset_returns[bconf["risk_free_asset"]]
+
+    allocations = regime_allocations(config)
+    results: dict[str, StrategyResult] = {
+        "primary": run_regime_strategy(
+            asset_returns, primary_regime, allocations, transaction_cost_bps=cost_bps
+        ),
+        "secondary": run_regime_strategy(
+            asset_returns, secondary_regime, allocations, transaction_cost_bps=cost_bps
+        ),
+        "static_60_40": run_static_strategy(
+            asset_returns, static_6040_allocation(config), transaction_cost_bps=cost_bps
+        ),
+        "equal_weight": run_static_strategy(
+            asset_returns, equal_weight_allocation(config), transaction_cost_bps=cost_bps
+        ),
+        "growth_basket_buy_and_hold": run_buy_and_hold_strategy(
+            asset_returns, growth_basket_allocation(config), transaction_cost_bps=cost_bps
+        ),
+    }
+
+    summary = build_summary_table(results, risk_free_returns)
+    annual_returns = annual_returns_table(results)
+    monthly_returns = pd.DataFrame({name: r.returns_post_cost for name, r in results.items()})
+    crisis = crisis_period_performance(annual_returns)
+
+    primary_aligned = primary_regime.reindex(asset_returns.index)
+    secondary_aligned = secondary_regime.reindex(asset_returns.index)
+    regime_avg = regime_average_returns(
+        asset_returns, primary_aligned, {name: r.returns_post_cost for name, r in results.items()}
+    )
+    agreement = regime_agreement_rate(primary_aligned, secondary_aligned)
+
+    regime_analysis_rows: list[dict] = []
+    for regime, row in regime_avg.iterrows():
+        for series, value in row.items():
+            regime_analysis_rows.append(
+                {
+                    "analysis_type": "regime_avg_monthly_return",
+                    "key": regime,
+                    "series": series,
+                    "value": value,
+                }
+            )
+    for year, row in crisis.iterrows():
+        for series, value in row.items():
+            regime_analysis_rows.append(
+                {"analysis_type": "crisis_year_return", "key": str(year), "series": series, "value": value}
+            )
+    regime_analysis_rows.append(
+        {
+            "analysis_type": "primary_secondary_agreement_rate",
+            "key": "overall",
+            "series": "tradable_regime",
+            "value": agreement,
+        }
+    )
+    regime_analysis = pd.DataFrame(regime_analysis_rows)
+
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    summary.to_csv(BACKTEST_SUMMARY_PATH, index=False)
+    annual_returns.to_csv(BACKTEST_ANNUAL_RETURNS_PATH)
+    monthly_returns.to_csv(BACKTEST_MONTHLY_RETURNS_PATH)
+    results["primary"].weights.to_csv(BACKTEST_ALLOCATIONS_PRIMARY_PATH)
+    results["secondary"].weights.to_csv(BACKTEST_ALLOCATIONS_SECONDARY_PATH)
+    regime_analysis.to_csv(BACKTEST_REGIME_ANALYSIS_PATH, index=False)
+
+    table = Table(title="Backtest Summary (post-cost)")
+    summary_cols = [
+        "strategy",
+        "start_date",
+        "end_date",
+        "cagr_post_cost",
+        "annualized_vol_post_cost",
+        "sharpe_post_cost",
+        "max_drawdown_post_cost",
+        "final_value_post_cost",
+    ]
+    for col in summary_cols:
+        table.add_column(col)
+    for _, row in summary.iterrows():
+        table.add_row(*[f"{row[c]:.4f}" if isinstance(row[c], float) else str(row[c]) for c in summary_cols])
+    console.print(table)
+    console.print(f"[green]Saved 6 backtest output files to {PROCESSED_DIR}[/green]")
 
 
 @app.command("run-all")

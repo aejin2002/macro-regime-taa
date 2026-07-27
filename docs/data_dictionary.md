@@ -31,14 +31,31 @@ error rather than being silently dropped or substituted. Metadata
 `docs/methodology.md` for why it must not be treated as the Conference
 Board LEI.
 
-## Growth Asset Basket (`config/default.yaml`, not a FRED series)
+## Asset / FX tickers (Yahoo Finance via `yfinance`, `config/default.yaml`)
 
-`growth_basket.sp500_weight` / `growth_basket.kospi200_weight` (default
-0.5 / 0.5) are structural allocation weights for when the growth axis is
-"Up" -- S&P 500 and KOSPI 200 are both constituents of one basket, not
-separate per-country regime picks. No price series for either asset is
-fetched or used in this build; the weights are declared for the future
-asset-allocation layer only (see `docs/methodology.md`).
+The only price data source in this repo -- no existing internal asset
+price infrastructure was reused because none existed. All fetched with
+`auto_adjust=True` (split+dividend-adjusted = total-return equivalent).
+
+| Ticker | Role | Verified inception |
+|---|---|---|
+| `SPY` | Growth Asset Basket, 60% | 1993-01-29 |
+| `069500.KS` (KODEX 200) | Growth Asset Basket, 40% (KRW, converted to USD) | 2007-01-29 |
+| `KRW=X` | USD/KRW FX rate, month-end only, for KODEX 200 conversion | 2005-01-03 |
+| `HYG` | High Yield | 2007-04-11 |
+| `LQD` | Investment Grade | 2002-07-30 |
+| `IEF` | Intermediate Treasury | 2002-07-30 |
+| `TLT` | Long Treasury | 2002-07-30 |
+| `GLD` | Gold | 2004-11-18 |
+| `BIL` | T-bills; also the risk-free rate for Sharpe/Sortino | 2007-05-30 (latest -- drives the common backtest start) |
+| `DBC` | Commodities | 2006-02-06 |
+| `TIP` | TIPS | 2003-12-05 |
+
+`growth_basket.spy_weight` / `kodex200_weight` (0.6 / 0.4) are the fixed
+Growth Asset Basket weights, used exactly as configured, not optimized.
+`backtest.assets` maps every other category to its ticker;
+`backtest.regime_allocations` holds the 5 fixed allocation tables. See
+`docs/methodology.md`, "Backtest", for the full ruleset.
 
 ## External CSV inputs (optional, `data/external/`)
 
@@ -77,3 +94,8 @@ excluded but outputs are local-only build products, not committed)
 | `inflation_model_a_detail.csv`, `inflation_model_b_detail.csv`, `inflation_model_c_detail.csv`, `inflation_model_d_detail.csv` | `build-signals` | Component-level inflation model diagnostics |
 | `evaluation_report.json` | `evaluate` | Full per-model, per-horizon evaluation results vs. naive baselines |
 | `regime_output_primary.csv`, `regime_output_secondary.csv` | `build-regime-output` | Standard asset-allocation output for the two frozen core models: `growth_score`, `growth_state`, `inflation_score`, `inflation_state`, `raw_regime`, `tradable_regime` (see Methodology, "Standard regime output") |
+| `backtest_summary.csv` | `run-backtest` | One row per strategy (Primary, Secondary, Static 60/40, Equal-weight, Growth Basket buy-and-hold): start/end date, CAGR, annualized vol, Sharpe, Sortino, max drawdown, Calmar, monthly win rate, annual positive-year ratio, avg annual turnover, final value -- pre-cost and post-cost |
+| `backtest_annual_returns.csv` | `run-backtest` | Calendar-year return per strategy (post-cost), index = year |
+| `backtest_monthly_returns.csv` | `run-backtest` | Month-end return per strategy (post-cost), index = date |
+| `backtest_allocations_primary.csv`, `backtest_allocations_secondary.csv` | `run-backtest` | Full monthly weight history (one column per underlying ticker) actually held each month |
+| `backtest_regime_analysis.csv` | `run-backtest` | Long-format table (`analysis_type`, `key`, `series`, `value`): per-regime average monthly return of every asset/strategy, 2008/2020/2022 calendar-year returns, and the Primary-vs-Secondary `tradable_regime` agreement rate |
