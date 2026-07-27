@@ -1,13 +1,18 @@
 """Streamlit research UI for macro-regime-taa.
 
 Reads the artifacts produced by `python -m macro_regime.cli run-all`
-(data/processed/*.csv, *.json). Run `make fetch build-signals evaluate`
-(or `make run-all`) before launching this app for the first time.
+(data/processed/*.csv, *.json). Locally, run `make fetch build-signals
+evaluate` (or `make run-all`) before launching this app for the first
+time. `data/processed/*` is git-ignored and never committed -- on a
+fresh deploy (e.g. Streamlit Community Cloud) those files don't exist
+yet, so this module bootstraps them automatically on first load; see
+`_ensure_core_data` / `_ensure_backtest_data` below.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -19,7 +24,14 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from macro_regime.config import load_config  # noqa: E402
+from macro_regime.cli import (  # noqa: E402
+    build_regime_output_cmd,
+    build_signals,
+    evaluate,
+    fetch,
+    run_backtest_cmd,
+)
+from macro_regime.config import MissingApiKeyError, load_config  # noqa: E402
 from macro_regime.signals.regime import (  # noqa: E402
     Regime,
     regime_distribution,
@@ -52,6 +64,66 @@ REGIME_COLORS = {
 }
 
 st.set_page_config(page_title="macro-regime-taa", layout="wide")
+
+
+def _bridge_streamlit_secrets_to_env() -> None:
+    """Streamlit Community Cloud supplies secrets via `st.secrets`
+    (configured in the app's Secrets settings), not a committed `.env`
+    file -- `.env` is git-ignored and never deployed. Bridge
+    `FRED_API_KEY` into the process environment once, so the existing
+    `Settings`/`FredClient` (which only read `os.environ` / `.env`) pick
+    it up unmodified. No-op locally where `FRED_API_KEY` is already set
+    via `.env`, and degrades silently if no secrets store exists at all
+    (e.g. no `.streamlit/secrets.toml` locally)."""
+    if os.environ.get("FRED_API_KEY"):
+        return
+    try:
+        key = st.secrets["FRED_API_KEY"]
+    except Exception:
+        return
+    if key:
+        os.environ["FRED_API_KEY"] = key
+
+
+@st.cache_resource(show_spinner="Fetching FRED data and computing signals (first run only, ~1-2 min)...")
+def _ensure_core_data() -> str | None:
+    """Run fetch -> build-signals -> evaluate -> build-regime-output once
+    per running server process if the core outputs don't exist yet --
+    e.g. a fresh deploy, since `data/processed/*` is never committed.
+    Returns an error message on failure, `None` on success (including
+    "already had data" -- checked first, so this is cheap on every
+    subsequent Streamlit rerun). `@st.cache_resource` scopes the actual
+    pipeline run to once per process; it does not re-run on later calls
+    or across user sessions sharing the same running app."""
+    if SIGNALS_PATH.exists() and REGIME_OUTPUT_PRIMARY_PATH.exists():
+        return None
+    try:
+        fetch(start_date=None, end_date=None, refresh_cache=False)
+        build_signals(growth_model="all", inflation_model="all")
+        evaluate()
+        build_regime_output_cmd()
+    except MissingApiKeyError as exc:
+        return str(exc)
+    except Exception as exc:  # noqa: BLE001 -- surface any pipeline failure to the UI, never crash silently
+        return f"Failed to build initial data: {exc}"
+    return None
+
+
+@st.cache_resource(show_spinner="Fetching asset/FX prices and running the backtest (first run only)...")
+def _ensure_backtest_data() -> str | None:
+    """Same idea as `_ensure_core_data`, for the (slower, separately
+    yfinance-backed) backtest outputs. Only called when the Backtest
+    page is actually visited -- no reason to pay this cost for users who
+    never open that page."""
+    if BACKTEST_SUMMARY_PATH.exists():
+        return None
+    if not REGIME_OUTPUT_PRIMARY_PATH.exists() or not REGIME_OUTPUT_SECONDARY_PATH.exists():
+        return "Regime output isn't ready yet -- reload this page after the core pipeline finishes."
+    try:
+        run_backtest_cmd(refresh_cache=False)
+    except Exception as exc:  # noqa: BLE001 -- surface any pipeline failure to the UI, never crash silently
+        return f"Failed to run the backtest: {exc}"
+    return None
 
 
 @st.cache_data
@@ -415,7 +487,17 @@ def page_methodology(config: dict) -> None:
 
 
 def main() -> None:
+    _bridge_streamlit_secrets_to_env()
     config = load_config()
+
+    core_error = _ensure_core_data()
+    if core_error:
+        st.error(
+            f"Couldn't build the initial data: {core_error}\n\n"
+            "If this is a fresh deploy, add `FRED_API_KEY` under this app's "
+            "Secrets settings (Streamlit Community Cloud) and reload."
+        )
+
     wide = _load_csv(WIDE_PATH)
     signals = _load_csv(SIGNALS_PATH)
     regime_meta = _load_json(REGIME_METADATA_PATH)
@@ -423,12 +505,6 @@ def main() -> None:
     series_meta = _load_json(SERIES_METADATA_PATH)
     regime_output_primary = _load_csv(REGIME_OUTPUT_PRIMARY_PATH)
     regime_output_secondary = _load_csv(REGIME_OUTPUT_SECONDARY_PATH)
-    backtest_summary = _load_csv_plain(BACKTEST_SUMMARY_PATH)
-    backtest_annual_returns = _load_csv(BACKTEST_ANNUAL_RETURNS_PATH)
-    backtest_monthly_returns = _load_csv(BACKTEST_MONTHLY_RETURNS_PATH)
-    backtest_allocations_primary = _load_csv(BACKTEST_ALLOCATIONS_PRIMARY_PATH)
-    backtest_allocations_secondary = _load_csv(BACKTEST_ALLOCATIONS_SECONDARY_PATH)
-    backtest_regime_analysis = _load_csv_plain(BACKTEST_REGIME_ANALYSIS_PATH)
 
     st.sidebar.title("macro-regime-taa")
     page = st.sidebar.radio(
@@ -459,13 +535,16 @@ def main() -> None:
     elif page == "Regime Output":
         page_regime_output(regime_output_primary, regime_output_secondary)
     elif page == "Backtest":
+        backtest_error = _ensure_backtest_data()
+        if backtest_error:
+            st.error(f"Couldn't build backtest data: {backtest_error}")
         page_backtest(
-            backtest_summary,
-            backtest_annual_returns,
-            backtest_monthly_returns,
-            backtest_allocations_primary,
-            backtest_allocations_secondary,
-            backtest_regime_analysis,
+            _load_csv_plain(BACKTEST_SUMMARY_PATH),
+            _load_csv(BACKTEST_ANNUAL_RETURNS_PATH),
+            _load_csv(BACKTEST_MONTHLY_RETURNS_PATH),
+            _load_csv(BACKTEST_ALLOCATIONS_PRIMARY_PATH),
+            _load_csv(BACKTEST_ALLOCATIONS_SECONDARY_PATH),
+            _load_csv_plain(BACKTEST_REGIME_ANALYSIS_PATH),
         )
     elif page == "Evaluation":
         page_evaluation(eval_report)
