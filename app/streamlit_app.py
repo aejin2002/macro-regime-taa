@@ -193,16 +193,35 @@ def page_overview(signals: pd.DataFrame | None, wide: pd.DataFrame | None, regim
         _missing_data_notice("signals.csv")
         return
 
-    latest_date = signals.index.max()
-    st.caption(f"Latest signal date: **{latest_date.date() if pd.notna(latest_date) else 'n/a'}**")
+    growth_cols = [c for c in signals.columns if c.startswith("growth_model")]
+    inflation_cols = [c for c in signals.columns if c.startswith("inflation_model")]
+    regime_cols = [c for c in signals.columns if c.startswith("regime_")]
+
+    # signals.csv's date index is the union of every underlying series'
+    # resampled dates -- a still-in-progress month can already have a row
+    # (e.g. weekly Initial Claims has a July observation) even though
+    # monthly-frequency inputs (CLI, CPI, industrial production, ...)
+    # haven't published a July value yet. That row would show up here as
+    # NaN across most growth/inflation columns and UNKNOWN for every
+    # regime. Use the most recent row where every growth/inflation model
+    # actually produced a real classification instead of the literal last
+    # row -- this only changes what the Overview page displays; signals.csv
+    # itself and every other page are untouched.
+    model_cols = growth_cols + inflation_cols
+    complete_dates = signals.index[signals[model_cols].notna().all(axis=1)] if model_cols else signals.index
+    raw_latest_date = signals.index.max()
+    latest_date = complete_dates.max() if len(complete_dates) else raw_latest_date
+
+    st.caption(f"Latest complete signal date: **{latest_date.date() if pd.notna(latest_date) else 'n/a'}**")
+    if pd.notna(raw_latest_date) and pd.notna(latest_date) and raw_latest_date != latest_date:
+        st.caption(
+            f"signals.csv's most recent row ({raw_latest_date.date()}) is a still-in-progress month -- "
+            "most monthly-frequency inputs haven't been published for it yet, so it's skipped here."
+        )
     st.caption(
         "All figures below use current, revised FRED data (a 'revised-data backtest'), "
         "not ALFRED real-time vintages -- see the Methodology page."
     )
-
-    growth_cols = [c for c in signals.columns if c.startswith("growth_model")]
-    inflation_cols = [c for c in signals.columns if c.startswith("inflation_model")]
-    regime_cols = [c for c in signals.columns if c.startswith("regime_")]
 
     latest = signals.loc[latest_date] if pd.notna(latest_date) else None
 
