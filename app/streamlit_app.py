@@ -54,6 +54,14 @@ BACKTEST_MONTHLY_RETURNS_PATH = PROCESSED_DIR / "backtest_monthly_returns.csv"
 BACKTEST_ALLOCATIONS_PRIMARY_PATH = PROCESSED_DIR / "backtest_allocations_primary.csv"
 BACKTEST_ALLOCATIONS_SECONDARY_PATH = PROCESSED_DIR / "backtest_allocations_secondary.csv"
 BACKTEST_REGIME_ANALYSIS_PATH = PROCESSED_DIR / "backtest_regime_analysis.csv"
+BACKTEST_OUTPUT_PATHS = [
+    BACKTEST_SUMMARY_PATH,
+    BACKTEST_ANNUAL_RETURNS_PATH,
+    BACKTEST_MONTHLY_RETURNS_PATH,
+    BACKTEST_ALLOCATIONS_PRIMARY_PATH,
+    BACKTEST_ALLOCATIONS_SECONDARY_PATH,
+    BACKTEST_REGIME_ANALYSIS_PATH,
+]
 
 REGIME_COLORS = {
     Regime.GOLDILOCKS.value: "#2E7D32",
@@ -109,21 +117,42 @@ def _ensure_core_data() -> str | None:
     return None
 
 
-@st.cache_resource(show_spinner="Fetching asset/FX prices and running the backtest (first run only)...")
-def _ensure_backtest_data() -> str | None:
-    """Same idea as `_ensure_core_data`, for the (slower, separately
-    yfinance-backed) backtest outputs. Only called when the Backtest
-    page is actually visited -- no reason to pay this cost for users who
-    never open that page."""
-    if BACKTEST_SUMMARY_PATH.exists():
-        return None
+def _ensure_backtest_data() -> None:
+    """Run the (slower, separately yfinance-backed) backtest pipeline if
+    any of its output files are missing -- e.g. a fresh deploy, or a
+    Streamlit Community Cloud reboot that wiped the ephemeral
+    filesystem out from under an otherwise still-running process. Checks
+    the filesystem directly on every call (deliberately not
+    `@st.cache_resource`-memoized) so a reboot that clears the files is
+    always noticed, instead of trusting a stale in-memory "already ran"
+    flag. Only called when the Backtest page is actually visited -- no
+    reason to pay this cost for users who never open that page.
+
+    On success, triggers `st.rerun()` so the page re-executes from the
+    top and reads the freshly written files -- reusing them in the same
+    run would risk hitting a `st.cache_data`-wrapped loader that already
+    cached `None` for that path from before the files existed. On
+    failure, surfaces the real exception in the UI (`st.exception`) and
+    halts (`st.stop()`) rather than swallowing it."""
+    if all(p.exists() for p in BACKTEST_OUTPUT_PATHS):
+        return
+
     if not REGIME_OUTPUT_PRIMARY_PATH.exists() or not REGIME_OUTPUT_SECONDARY_PATH.exists():
-        return "Regime output isn't ready yet -- reload this page after the core pipeline finishes."
+        core_error = _ensure_core_data()
+        if core_error:
+            st.error(f"Couldn't build the core regime output needed for the backtest: {core_error}")
+            st.stop()
+
+    st.info("Building backtest outputs. This may take 1-2 minutes...")
     try:
-        run_backtest_cmd(refresh_cache=False)
-    except Exception as exc:  # noqa: BLE001 -- surface any pipeline failure to the UI, never crash silently
-        return f"Failed to run the backtest: {exc}"
-    return None
+        with st.spinner("Fetching asset/FX prices and running the backtest..."):
+            run_backtest_cmd(refresh_cache=False)
+    except Exception as exc:  # noqa: BLE001 -- caught only to surface it via st.exception, never swallowed
+        st.error("Failed to build backtest outputs.")
+        st.exception(exc)
+        st.stop()
+
+    st.rerun()
 
 
 @st.cache_data
@@ -535,9 +564,7 @@ def main() -> None:
     elif page == "Regime Output":
         page_regime_output(regime_output_primary, regime_output_secondary)
     elif page == "Backtest":
-        backtest_error = _ensure_backtest_data()
-        if backtest_error:
-            st.error(f"Couldn't build backtest data: {backtest_error}")
+        _ensure_backtest_data()
         page_backtest(
             _load_csv_plain(BACKTEST_SUMMARY_PATH),
             _load_csv(BACKTEST_ANNUAL_RETURNS_PATH),
