@@ -1,0 +1,93 @@
+# macro-regime-taa default configuration
+# All series IDs, lags, and thresholds used across the pipeline are defined here
+# so behavior can be audited and changed without touching code.
+
+fred:
+  base_url: "https://api.stlouisfed.org/fred"
+  timeout_seconds: 15
+  max_retries: 3
+  backoff_seconds: 1.5
+
+# Growth target + confirmation series
+series:
+  growth:
+    INDPRO: { title: "Industrial Production Index", frequency: "m", units: "Index" }
+    CFNAI: { title: "Chicago Fed National Activity Index", frequency: "m", units: "Index" }
+    CFNAIMA3: { title: "Chicago Fed National Activity Index, 3-Month Moving Average", frequency: "m", units: "Index" }
+    ICSA: { title: "Initial Claims", frequency: "w", units: "Number" }
+    PERMIT: { title: "New Private Housing Units Authorized by Building Permits", frequency: "m", units: "Thousands" }
+    USPHCI: { title: "Coincident Economic Activity Index for the United States", frequency: "m", units: "Index" }
+    USALOLITOAASTSAM: { title: "OECD Composite Leading Indicator, United States, Amplitude Adjusted", frequency: "m", units: "Index" }
+    KORLOLITOAASTSAM: { title: "OECD Composite Leading Indicator, Korea, Amplitude Adjusted", frequency: "m", units: "Index" }
+  inflation:
+    CPILFESL: { title: "Core CPI, Seasonally Adjusted", frequency: "m", units: "Index" }
+    PCEPILFE: { title: "Core PCE Price Index", frequency: "m", units: "Index" }
+    CPIAUCSL: { title: "Headline CPI, Seasonally Adjusted", frequency: "m", units: "Index" }
+  diagnostics:
+    T10Y3M: { title: "10-Year Treasury Minus 3-Month Treasury", frequency: "d", units: "Percent" }
+    T10Y2Y: { title: "10-Year Treasury Minus 2-Year Treasury", frequency: "d", units: "Percent" }
+    T5YIE: { title: "5-Year Breakeven Inflation Rate", frequency: "d", units: "Percent" }
+
+# NOTE: FRED's USSLIND is the Philadelphia Fed "State Leading Indexes" derived
+# national series, discontinued after 2020. It is NOT the Conference Board LEI.
+# The Conference Board LEI must be supplied via data/external/conference_board_lei.csv.
+conference_board_lei_csv: "data/external/conference_board_lei.csv"
+ism_new_orders_csv: "data/external/ism_new_orders.csv"
+ism_prices_paid_csv: "data/external/ism_prices_paid.csv"
+cleveland_nowcast_csv: "data/external/cleveland_fed_inflation_nowcast.csv"
+
+growth_models:
+  model_a_cli:
+    us_series: "USALOLITOAASTSAM"
+    kr_series: "KORLOLITOAASTSAM"
+    change_windows_months: [1, 3, 6]
+    primary_window_months: 3
+    stabilization_windows_months: [3, 6]
+  model_b_fred_minimal:
+    claims_series: "ICSA"
+    claims_change_months: 3
+    claims_monthly_average: true
+    permits_series: "PERMIT"
+    permits_change_months: 6
+    activity_series: "CFNAIMA3"
+  model_c_simple_two_signal:
+    ism_new_orders_change_months: 3
+    claims_series: "ICSA"
+    claims_change_months: 3
+
+inflation_models:
+  model_a_realized_core:
+    core_series: "CPILFESL"
+    short_window_months: 3
+    long_window_months: 12
+  model_b_leading_composite:
+    breakeven_series: "T5YIE"
+    breakeven_change_months: 3
+    core_series: "CPILFESL"
+  model_c_cleveland_nowcast:
+    enabled: false
+    reason: >
+      No official, reproducible historical vintage file for the Cleveland Fed
+      Inflation Nowcast has been located for this build. Only current scraped
+      values are publicly available, and using those as if they were historical
+      would introduce look-ahead bias. See docs/methodology.md.
+
+zscore:
+  min_periods_months: 60
+  rolling_window_months: 120
+  ddof: 1
+  winsorize: false
+
+lookahead:
+  monthly_macro_lag_months: 1
+  daily_market_lag_days: 1
+  effective_from: "next_trading_day_of_month_after_signal_month"
+
+evaluation:
+  growth_target_series: "INDPRO"
+  growth_horizons_months: [3, 6]
+  inflation_target_series: "CPILFESL"
+  inflation_horizons_months: [3, 6]
+  naive_baselines: ["always_up", "always_down"]
+
+default_start_date: "1990-01-01"
