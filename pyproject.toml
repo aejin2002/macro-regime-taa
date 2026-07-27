@@ -44,6 +44,18 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/macro_regime"]
 
+[tool.poetry]
+# Package metadata (name, version, description, etc.) stays in [project]
+# above (Poetry 2.x PEP 621 interop). This section exists only to point
+# Poetry's package discovery at the actual src-layout package -- without
+# it, Poetry infers the package dir from the project name
+# ("macro-regime-taa" -> "macro_regime_taa") and fails with
+# "No file/folder found for package macro-regime-taa" (the error seen on
+# Streamlit Community Cloud). The real package lives at src/macro_regime.
+packages = [
+    { include = "macro_regime", from = "src" }
+]
+
 [tool.ruff]
 line-length = 110
 target-version = "py311"
