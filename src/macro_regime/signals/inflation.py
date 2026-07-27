@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from macro_regime.utils.dates import normalize_month_end_index, resample_to_monthly
 from macro_regime.utils.stats import (
     annualize_from_periods,
     diff_n,
@@ -76,6 +77,7 @@ def leading_inflation_composite(
     are always present in the output but the ISM-inclusive one is all-NaN
     if ISM data was not supplied.
     """
+    core_index_monthly = normalize_month_end_index(core_index_monthly)
     momentum = core_inflation_momentum(
         core_index_monthly,
         short_window_months=core_short_window_months,
@@ -83,7 +85,15 @@ def leading_inflation_composite(
     )
     core_component = rolling_zscore(momentum["signal_raw"], zscore_window, zscore_min_periods)
 
-    breakeven_change = diff_n(breakeven_5y_daily_or_monthly, breakeven_change_months)
+    # T5YIE is a daily series; it must be resampled to one observation per
+    # month before diff_n's "periods" argument means months rather than
+    # calendar/trading days. The resulting index is then normalized to
+    # month-end to line up with core_index_monthly (which FRED stamps
+    # first-of-month) when the two are combined below.
+    breakeven_monthly = normalize_month_end_index(
+        resample_to_monthly(breakeven_5y_daily_or_monthly, how="last")
+    )
+    breakeven_change = diff_n(breakeven_monthly, breakeven_change_months)
     breakeven_component = rolling_zscore(breakeven_change, zscore_window, zscore_min_periods)
 
     out = pd.DataFrame(index=core_index_monthly.index)
@@ -95,6 +105,7 @@ def leading_inflation_composite(
     )
 
     if ism_prices_paid_monthly is not None:
+        ism_prices_paid_monthly = normalize_month_end_index(ism_prices_paid_monthly)
         ism_change = diff_n(ism_prices_paid_monthly, breakeven_change_months)
         ism_component = rolling_zscore(ism_change, zscore_window, zscore_min_periods)
         out["ism_component"] = ism_component.reindex(out.index)

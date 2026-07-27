@@ -34,6 +34,21 @@ def resample_to_monthly(series: pd.Series, how: str = "last") -> pd.Series:
     raise ValueError(f"Unsupported resample method: {how}")
 
 
+def normalize_month_end_index(series: pd.Series) -> pd.Series:
+    """Re-stamp a monthly series' index to month-end, regardless of whether
+    the source used first-of-month (FRED's usual convention for series like
+    PERMIT/CFNAIMA3) or already-month-end labels (e.g. after resampling).
+
+    Combining monthly series from different sources without this raises a
+    silent bug: two economically-identical months (e.g. "2020-01-01" from
+    one series and "2020-01-31" from another) are treated as different
+    index labels, so joins/`pd.DataFrame({...})` produce all-NaN rows
+    instead of erroring.
+    """
+    idx = pd.to_datetime(series.index).to_period("M").to_timestamp("M")
+    return series.set_axis(idx)
+
+
 def next_trading_day_of_month(month_end: pd.Timestamp) -> pd.Timestamp:
     """Approximate the first calendar day of the month after `month_end`.
 

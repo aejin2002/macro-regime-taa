@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from macro_regime.utils.dates import resample_to_monthly
+from macro_regime.utils.dates import normalize_month_end_index, resample_to_monthly
 from macro_regime.utils.stats import diff_n, rolling_zscore, sign_label
 
 UP, DOWN, UNKNOWN, NEUTRAL = "Up", "Down", "Unknown", "Neutral"
@@ -88,13 +88,19 @@ def growth_model_b_fred_minimal(
     zscore_window: int = 120,
     zscore_min_periods: int = 60,
 ) -> pd.DataFrame:
-    claims_monthly = resample_to_monthly(claims_weekly, how="mean")
+    # FRED's native monthly series (PERMIT, CFNAIMA3) are stamped first-of-month,
+    # while resampling ICSA to monthly produces month-end labels. Normalizing
+    # all three to the same month-end convention is required before combining
+    # them -- otherwise no dates line up and every row silently comes out NaN.
+    claims_monthly = normalize_month_end_index(resample_to_monthly(claims_weekly, how="mean"))
     claims_change = diff_n(claims_monthly, claims_change_months)
     claims_component = -rolling_zscore(claims_change, zscore_window, zscore_min_periods)
 
+    permits_monthly = normalize_month_end_index(permits_monthly)
     permits_change = diff_n(permits_monthly, permits_change_months)
     permits_component = rolling_zscore(permits_change, zscore_window, zscore_min_periods)
 
+    cfnai_ma3_monthly = normalize_month_end_index(cfnai_ma3_monthly)
     activity_component = rolling_zscore(cfnai_ma3_monthly, zscore_window, zscore_min_periods)
 
     df = pd.DataFrame(
@@ -128,10 +134,11 @@ def growth_model_c_simple_two_signal(
     if ism_new_orders_monthly is None:
         return None
 
+    ism_new_orders_monthly = normalize_month_end_index(ism_new_orders_monthly)
     ism_change = diff_n(ism_new_orders_monthly, change_months)
     ism_z = rolling_zscore(ism_change, zscore_window, zscore_min_periods)
 
-    claims_monthly = resample_to_monthly(claims_weekly, how="mean")
+    claims_monthly = normalize_month_end_index(resample_to_monthly(claims_weekly, how="mean"))
     claims_change = diff_n(claims_monthly, change_months)
     claims_z = rolling_zscore(claims_change, zscore_window, zscore_min_periods)
 
