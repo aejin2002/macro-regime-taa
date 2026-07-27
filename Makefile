@@ -1,4 +1,4 @@
-.PHONY: setup fetch build-signals evaluate app test lint
+.PHONY: setup fetch build-signals evaluate run-all app test lint
 
 UV := $(shell command -v uv 2> /dev/null)
 
@@ -19,6 +19,9 @@ build-signals:
 
 evaluate:
 	python -m macro_regime.cli evaluate
+
+run-all:
+	python -m macro_regime.cli run-all
 
 app:
 	streamlit run app/streamlit_app.py
