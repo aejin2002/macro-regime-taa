@@ -11,24 +11,26 @@ else
 	. .venv/bin/activate && pip install -U pip && pip install -e ".[dev]"
 endif
 
+PY := .venv/bin/python
+
 fetch:
-	python -m macro_regime.cli fetch
+	$(PY) -m macro_regime.cli fetch
 
 build-signals:
-	python -m macro_regime.cli build-signals
+	$(PY) -m macro_regime.cli build-signals
 
 evaluate:
-	python -m macro_regime.cli evaluate
+	$(PY) -m macro_regime.cli evaluate
 
 run-all:
-	python -m macro_regime.cli run-all
+	$(PY) -m macro_regime.cli run-all
 
 app:
-	streamlit run app/streamlit_app.py
+	.venv/bin/streamlit run app/streamlit_app.py
 
 test:
-	pytest -q
+	.venv/bin/pytest -q
 
 lint:
-	ruff check src app tests
-	mypy src
+	.venv/bin/ruff check src app tests
+	.venv/bin/mypy src
