@@ -18,10 +18,13 @@ series:
     PERMIT: { title: "New Private Housing Units Authorized by Building Permits", frequency: "m", units: "Thousands" }
     USPHCI: { title: "Coincident Economic Activity Index for the United States", frequency: "m", units: "Index" }
     USALOLITOAASTSAM: { title: "OECD Composite Leading Indicator, United States, Amplitude Adjusted", frequency: "m", units: "Index" }
+    AMTMNO: { title: "Manufacturers' New Orders: Total Manufacturing", frequency: "m", units: "Millions of Dollars" }
   inflation:
     CPILFESL: { title: "Core CPI, Seasonally Adjusted", frequency: "m", units: "Index" }
     PCEPILFE: { title: "Core PCE Price Index", frequency: "m", units: "Index" }
     CPIAUCSL: { title: "Headline CPI, Seasonally Adjusted", frequency: "m", units: "Index" }
+    MEDCPIM158SFRBCLE: { title: "Median CPI (Cleveland Fed)", frequency: "m", units: "Percent" }
+    PALLFNFINDEXM: { title: "Global Price Index of All Commodities (IMF)", frequency: "m", units: "Index" }
   diagnostics:
     T10Y3M: { title: "10-Year Treasury Minus 3-Month Treasury", frequency: "d", units: "Percent" }
     T10Y2Y: { title: "10-Year Treasury Minus 2-Year Treasury", frequency: "d", units: "Percent" }
@@ -30,10 +33,14 @@ series:
 # NOTE: FRED's USSLIND is the Philadelphia Fed "State Leading Indexes" derived
 # national series, discontinued after 2020. It is NOT the Conference Board LEI.
 # The Conference Board LEI must be supplied via data/external/conference_board_lei.csv.
+# Legacy/optional external CSVs. None of the core models (Model A, Model B --
+# see growth_models/inflation_models below) depend on these. They only feed
+# legacy/proxy models that are kept for baseline comparison:
+# model_c_simple_two_signal (growth), model_b_leading_composite (inflation).
+# Core operational models use FRED-auto-fetched data exclusively.
 conference_board_lei_csv: "data/external/conference_board_lei.csv"
 ism_new_orders_csv: "data/external/ism_new_orders.csv"
 ism_prices_paid_csv: "data/external/ism_prices_paid.csv"
-cleveland_nowcast_csv: "data/external/cleveland_fed_inflation_nowcast.csv"
 
 growth_models:
   model_a_cli:
@@ -52,6 +59,11 @@ growth_models:
     ism_new_orders_change_months: 3
     claims_series: "ICSA"
     claims_change_months: 3
+  model_d_amtmno_claims:
+    amtmno_series: "AMTMNO"
+    amtmno_change_months: 3
+    claims_series: "ICSA"
+    claims_change_months: 3
 
 inflation_models:
   model_a_realized_core:
@@ -62,13 +74,14 @@ inflation_models:
     breakeven_series: "T5YIE"
     breakeven_change_months: 3
     core_series: "CPILFESL"
-  model_c_cleveland_nowcast:
-    enabled: false
-    reason: >
-      No official, reproducible historical vintage file for the Cleveland Fed
-      Inflation Nowcast has been located for this build. Only current scraped
-      values are publicly available, and using those as if they were historical
-      would introduce look-ahead bias. See docs/methodology.md.
+  model_c_cleveland_median_cpi:
+    median_cpi_series: "MEDCPIM158SFRBCLE"
+    ma_window_months: 3
+    lag_months: 3
+  model_d_commodity_core_aux:
+    commodity_series: "PALLFNFINDEXM"
+    commodity_change_months: 3
+    core_series: "CPILFESL"
 
 # Growth Asset Basket: the regime engine above classifies a single US
 # Growth x US Inflation regime (see docs/methodology.md). When the growth

@@ -8,6 +8,17 @@ selection, position sizing, or ETF backtesting. The deliverable is a
 research engine for classifying and evaluating macro regimes, not a
 trading system.
 
+## Core model data source policy
+
+**The core operational models (Model A, Model B -- see "Research models"
+below) use only data auto-fetched from the FRED API.** No external XLSX,
+manually-supplied CSV, or web-scraped data is implemented in a core
+model. A handful of older models predate this policy and remain in the
+codebase as explicitly-labeled **legacy/auxiliary** signals for baseline
+comparison -- they still require an optional external CSV and stay
+inactive without one; they are never promoted into the core Model A/B
+pairing. See "Research models" for the exact classification.
+
 ## Regime definition
 
 Two binary axes, classified monthly from **US growth and US inflation
@@ -70,16 +81,30 @@ growth_score = mean(claims_component, permits_component, activity_component)
 The claims component's sign is flipped because *falling* initial claims
 signal an *improving* labor market (i.e. growth up).
 
-**Model C -- Simple Two-Signal.** Only active when
-`data/external/ism_new_orders.csv` is present:
+**Model C -- Simple Two-Signal (legacy/auxiliary, not core).** Only
+active when `data/external/ism_new_orders.csv` is present -- this is
+exactly the kind of external-CSV dependency the core model data source
+policy above excludes from Model A/B:
 
 ```
 growth_score = (z(change_3m(ISM New Orders)) - z(change_3m(Initial Claims))) / 2
 ```
 
 If the CSV is absent, this model returns `None` and is skipped everywhere
-downstream (signals, regimes, evaluation) -- the other two growth models
+downstream (signals, regimes, evaluation) -- the other growth models
 are unaffected.
+
+**Model D -- AMTMNO + Initial Claims (fully FRED-native, core Model B
+growth axis).** Replaces Model C's ISM New Orders input with `AMTMNO`
+(Manufacturers' New Orders: Total Manufacturing), which is FRED-native --
+this model has no external-CSV dependency at all:
+
+```
+amtmno_component  =  z(change_3m(AMTMNO))
+claims_component  = -z(change_3m(monthly-average(ICSA)))
+growth_score = mean(amtmno_component, claims_component)
+label = Up if growth_score > 0, Down if growth_score < 0, Unknown if tied/insufficient history
+```
 
 ## Inflation models
 
@@ -93,7 +118,8 @@ signal_raw         = core_3m_annualized - core_12m
 
 Default core series: `CPILFESL` (Core CPI, SA). Up if `signal_raw > 0`.
 
-**Model B -- Leading Inflation Composite.**
+**Model B -- Leading Inflation Composite (legacy/auxiliary baseline, not
+core).**
 
 ```
 inflation_score = mean(z(change_3m(ISM Prices Paid)), z(change_3m(T5YIE)), z(core momentum))
@@ -102,24 +128,82 @@ inflation_score = mean(z(change_3m(ISM Prices Paid)), z(change_3m(T5YIE)), z(cor
 If `data/external/ism_prices_paid.csv` is absent, a 2-signal variant
 (`inflation_score_no_ism`, dropping the ISM term) is computed and used
 instead; both columns are always present in the detail output so it is
-clear which one was actually active.
+clear which one was actually active. This is an established pre-existing
+baseline and is kept exactly as-is; the core model data source policy
+above applies to Model A/B (the two named research models), not to this
+proxy.
 
-**Model C -- Cleveland Fed Inflation Nowcast: disabled by default.**
-The Cleveland Fed publishes a *current* nowcast on its website, but no
-official, reproducible, downloadable **historical vintage** file was
-located at build time. Scraping today's displayed value and treating it
-as if it were the historical nowcast at each past date would be a severe
-form of look-ahead bias (the nowcast is revised continuously and today's
-page only shows the latest vintage). Until an official historical vintage
-source is identified, this model:
+**Model C -- Cleveland Median CPI Momentum.**
 
-- ships as a stub (`signals/inflation.py::cleveland_nowcast_signal`),
-- documents the exact input schema
-  (`forecast_date, target_month, measure, nowcast_value, vintage_date`)
-  expected at `data/external/cleveland_fed_inflation_nowcast.csv`,
-- produces **no backtest output** even if a file is supplied, until the
-  classification rule is implemented and validated against the nowcast's
-  disclosed methodology.
+> This is an institutional underlying-inflation trend signal, not the
+> Cleveland Fed Inflation Nowcast.
+
+The Cleveland Fed Inflation Nowcast itself was evaluated and rejected as
+a model input: it publishes only a *current* value, with no official,
+reproducible, downloadable historical vintage file, so backtesting it
+would require scraping today's displayed value and treating it as if it
+were the historical nowcast at each past date -- a severe form of
+look-ahead bias. In its place, Model C uses the Cleveland Fed's **Median
+CPI** series (`MEDCPIM158SFRBCLE`), which is FRED-native, auto-fetchable,
+and has monthly history back to 1983:
+
+```
+ma3_t  = mean(MEDCPIM158SFRBCLE over months [t-2, t])
+change = ma3_t - ma3_(t-3)
+label  = Up if change > 0, Down if change < 0, Unknown if change == 0 or NaN
+```
+
+This is an exact rule with no threshold tuning: the 3-month moving
+average is compared to itself 3 months prior, with ties/insufficient
+history mapping to `Unknown` (`utils/stats.py::sign_label`).
+
+**Model D -- Commodity + Core (2-signal, auxiliary/secondary research
+model, not core).**
+
+```
+inflation_score = mean(z(change_3m(PALLFNFINDEXM)), z(core momentum))
+```
+
+`PALLFNFINDEXM` (IMF Global Price Index of All Commodities, FRED-native,
+monthly since 1992) plus core inflation momentum -- a global commodity
+basket rather than a US-only producer-price measure. **This is
+structurally a 2-signal model with no ISM Prices Paid input at all**
+(`signals/inflation.py::commodity_core_composite` does not accept an ISM
+argument). An earlier iteration of this model attempted to be a 3-signal
+composite (ISM Prices Paid + commodity + core) that silently fell back to
+2 signals when the ISM CSV was absent, while still being labeled/reported
+as if the composite design were active -- that was corrected: the model
+now has no code path that can produce or claim a 3-signal result. It is
+kept only as a secondary research signal for comparison, not part of the
+core Model A/B pairing.
+
+## Research models (Model A / Model B) -- the core operational models
+
+These are the two core, fully FRED-native models this project is built
+around. Both are always computable end-to-end from a live FRED fetch
+alone -- no external CSV is required for either:
+
+| Research model | Growth | Inflation | Regime column |
+|---|---|---|---|
+| Model A | US OECD CLI (Growth Model A) | Cleveland Median CPI Momentum (Inflation Model C) | `regime_us_cli_cleveland_median_cpi` |
+| Model B | AMTMNO + Initial Claims (Growth Model D) | Core Inflation Momentum (Inflation Model A) | `regime_amtmno_claims_core_momentum` |
+
+Everything else the pipeline computes is legacy or auxiliary, kept for
+baseline comparison only, and explicitly **not** part of the core
+Model A/B pairing:
+
+| Column | Status | Why |
+|---|---|---|
+| `growth_model_fred_minimal` | Baseline/proxy | Pre-existing baseline, FRED-native, kept as-is |
+| `growth_model_two_signal` (Growth Model C) | Legacy | Requires `ism_new_orders.csv`; core policy excludes external-CSV models |
+| `inflation_model_leading_composite` (Inflation Model B) | Baseline/proxy | Pre-existing baseline, requires `ism_prices_paid.csv` for its full form; kept as-is |
+| `inflation_model_commodity_core_aux` (Inflation Model D) | Auxiliary/secondary | 2-signal only, FRED-native, but not one of the two named core models |
+
+`build-signals` still cross-joins every active growth model with every
+active inflation model into its own `regime_*` column (per "Regime
+definition" above) -- these auxiliary combinations remain visible for
+research purposes, they are just not what "Model A" / "Model B" refers
+to.
 
 ## Conference Board LEI vs. FRED USSLIND
 
@@ -213,8 +297,6 @@ performance.
 ## Current limitations
 
 - No full ALFRED real-time vintage panel (see above).
-- Cleveland Fed Inflation Nowcast backtest is disabled pending an official
-  historical vintage source.
 - `effective_date` uses calendar-day approximations, not an exchange
   trading calendar.
 - Lead-time estimation is a simple cross-correlation heuristic, not a

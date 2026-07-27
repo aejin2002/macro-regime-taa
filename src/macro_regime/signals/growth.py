@@ -1,6 +1,6 @@
 """Growth direction models.
 
-Three independent models, each producing an "Up" / "Down" / "Unknown"
+Four independent models, each producing an "Up" / "Down" / "Unknown"
 monthly label plus a continuous score where applicable. Models are kept
 independent (not blended) so their individual predictive power can be
 evaluated separately -- see evaluation/classification.py.
@@ -144,6 +144,44 @@ def growth_model_c_simple_two_signal(
 
     df = pd.DataFrame({"ism_component": ism_z, "claims_component": claims_z}).dropna(how="all")
     df["growth_score"] = (df["ism_component"] - df["claims_component"]) / 2
+    df["growth_label"] = df["growth_score"].apply(
+        lambda x: sign_label(x, up=UP, down=DOWN, unknown=UNKNOWN)
+    )
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Model D: AMTMNO + Initial Claims (fully FRED-native, no external CSV)
+# ---------------------------------------------------------------------------
+
+
+def growth_model_d_amtmno_claims(
+    amtmno_monthly: pd.Series,
+    claims_weekly: pd.Series,
+    *,
+    amtmno_change_months: int = 3,
+    claims_change_months: int = 3,
+    zscore_window: int = 120,
+    zscore_min_periods: int = 60,
+) -> pd.DataFrame:
+    """mean(z(change_3m(AMTMNO)), -z(change_3m(monthly-average(ICSA)))).
+
+    Replaces the ISM New Orders input in Model C with AMTMNO (Manufacturers'
+    New Orders: Total Manufacturing), which is FRED-native -- this model has
+    no external-CSV dependency at all.
+    """
+    amtmno_monthly = normalize_month_end_index(amtmno_monthly)
+    amtmno_change = diff_n(amtmno_monthly, amtmno_change_months)
+    amtmno_component = rolling_zscore(amtmno_change, zscore_window, zscore_min_periods)
+
+    claims_monthly = normalize_month_end_index(resample_to_monthly(claims_weekly, how="mean"))
+    claims_change = diff_n(claims_monthly, claims_change_months)
+    claims_component = -rolling_zscore(claims_change, zscore_window, zscore_min_periods)
+
+    df = pd.DataFrame(
+        {"amtmno_component": amtmno_component, "claims_component": claims_component}
+    )
+    df["growth_score"] = df.mean(axis=1, skipna=False)
     df["growth_label"] = df["growth_score"].apply(
         lambda x: sign_label(x, up=UP, down=DOWN, unknown=UNKNOWN)
     )

@@ -1,5 +1,5 @@
 """Loaders for optional external CSV inputs (Conference Board LEI, ISM
-New Orders / Prices Paid, Cleveland Fed nowcast).
+New Orders / Prices Paid).
 
 Every loader returns `None` when its file is missing, so callers can
 disable the dependent model with a clear warning instead of crashing.
@@ -61,29 +61,3 @@ def load_ism_prices_paid(path: str | Path) -> pd.DataFrame | None:
             "its 2-signal (no-ISM) variant."
         ),
     )
-
-
-def load_cleveland_nowcast(path: str | Path) -> pd.DataFrame | None:
-    """Load a reproducible historical Cleveland Fed Inflation Nowcast vintage
-    file, if one has been supplied. Expected columns:
-    forecast_date, target_month, measure, nowcast_value, vintage_date.
-
-    Absent an official downloadable history, this stays disabled -- see
-    docs/methodology.md for why scraping today's published value cannot
-    stand in for history.
-    """
-    path = Path(path)
-    if not path.exists():
-        warnings.warn(
-            "Cleveland Fed Inflation Nowcast CSV was not found. Inflation Model C is disabled.",
-            stacklevel=2,
-        )
-        return None
-    df = pd.read_csv(path)
-    required = {"forecast_date", "target_month", "measure", "nowcast_value", "vintage_date"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"{path}: missing required columns {sorted(missing)}")
-    for col in ("forecast_date", "target_month", "vintage_date"):
-        df[col] = pd.to_datetime(df[col])
-    return df.sort_values("forecast_date").reset_index(drop=True)

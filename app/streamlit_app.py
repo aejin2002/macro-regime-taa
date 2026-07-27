@@ -164,9 +164,9 @@ def page_inflation_models(signals: pd.DataFrame | None) -> None:
     st.dataframe(signals[inflation_cols].tail(24), use_container_width=True)
 
     st.caption(
-        "Cleveland Fed Inflation Nowcast (Model C) is disabled: no official, "
-        "reproducible historical vintage file was available at build time. "
-        "See the Methodology page."
+        "Model C (Cleveland Median CPI Momentum) is an institutional "
+        "underlying-inflation trend signal, not the Cleveland Fed Inflation "
+        "Nowcast. See the Methodology page."
     )
 
 

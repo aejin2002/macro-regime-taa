@@ -1,10 +1,4 @@
-"""Inflation direction models.
-
-Model C (Cleveland Fed Inflation Nowcast) is a stub: no official,
-reproducible historical vintage file was located for this build (see
-docs/methodology.md), so it produces no backtest output. It is included
-only so the input schema and activation path are documented and ready.
-"""
+"""Inflation direction models."""
 
 from __future__ import annotations
 
@@ -126,23 +120,74 @@ def leading_inflation_composite(
 
 
 # ---------------------------------------------------------------------------
-# Model C: Cleveland Fed Inflation Nowcast (stub)
+# Model C: Cleveland Median CPI Momentum
+#
+# This is an institutional underlying-inflation trend signal, not the
+# Cleveland Fed Inflation Nowcast. The Nowcast has no official,
+# reproducible historical vintage source (see docs/methodology.md), so it
+# was replaced with the Cleveland Fed's Median CPI series
+# (MEDCPIM158SFRBCLE), which is FRED-native and auto-fetchable.
 # ---------------------------------------------------------------------------
 
 
-def cleveland_nowcast_signal(nowcast_history: pd.DataFrame | None) -> pd.DataFrame | None:
-    """Returns None unless a reproducible historical vintage file has been
-    supplied via data/external/cleveland_fed_inflation_nowcast.csv.
-
-    Even when a file is present, this function deliberately does not
-    attempt to guess a direction rule -- that must be defined once real
-    vintage data is available and validated against the disclosed
-    methodology of the nowcast itself.
+def cleveland_median_cpi_momentum(
+    median_cpi_monthly: pd.Series,
+    *,
+    ma_window_months: int = 3,
+    lag_months: int = 3,
+) -> pd.DataFrame:
+    """3-month moving average of Median CPI vs. that same moving average
+    `lag_months` ago. Up if the MA rose, Down if it fell, Unknown if
+    unchanged or insufficient history -- exact rule, no threshold tuning.
     """
-    if nowcast_history is None:
-        return None
-    raise NotImplementedError(
-        "Cleveland Nowcast history was supplied, but Inflation Model C's "
-        "classification rule has not been implemented/validated in this "
-        "build. See docs/methodology.md before enabling this model."
+    ma = median_cpi_monthly.rolling(ma_window_months).mean()
+    change = diff_n(ma, lag_months)
+    label = change.apply(lambda x: sign_label(x, up=UP, down=DOWN, unknown=UNKNOWN))
+    return pd.DataFrame({"ma3": ma, "ma3_change": change, "inflation_label": label})
+
+
+# ---------------------------------------------------------------------------
+# Model D: Commodity + Core (2-signal, auxiliary/secondary research model)
+#
+# This is a FRED-only, 2-signal auxiliary signal -- PALLFNFINDEXM commodity
+# momentum + core inflation momentum. It is NOT part of the Model A/B core
+# pairing and has no ISM Prices Paid input at all (unlike the deprecated
+# 3-signal design this replaces), so it can never silently misrepresent
+# itself as a 3-signal composite when ISM data is unavailable: there is no
+# code path here that accepts or claims an ISM component.
+# ---------------------------------------------------------------------------
+
+
+def commodity_core_composite(
+    core_index_monthly: pd.Series,
+    commodity_monthly: pd.Series,
+    *,
+    commodity_change_months: int = 3,
+    core_short_window_months: int = 3,
+    core_long_window_months: int = 12,
+    zscore_window: int = 120,
+    zscore_min_periods: int = 60,
+) -> pd.DataFrame:
+    """mean(z(change_3m(broad commodity index)), z(core momentum)). 2-signal only."""
+    core_index_monthly = normalize_month_end_index(core_index_monthly)
+    momentum = core_inflation_momentum(
+        core_index_monthly,
+        short_window_months=core_short_window_months,
+        long_window_months=core_long_window_months,
     )
+    core_component = rolling_zscore(momentum["signal_raw"], zscore_window, zscore_min_periods)
+
+    commodity_monthly = normalize_month_end_index(commodity_monthly)
+    commodity_change = diff_n(commodity_monthly, commodity_change_months)
+    commodity_component = rolling_zscore(commodity_change, zscore_window, zscore_min_periods)
+
+    out = pd.DataFrame(index=core_index_monthly.index)
+    out["core_component"] = core_component
+    out["commodity_component"] = commodity_component.reindex(out.index)
+    out["inflation_score"] = out[["commodity_component", "core_component"]].mean(
+        axis=1, skipna=False
+    )
+    out["inflation_label"] = out["inflation_score"].apply(
+        lambda x: sign_label(x, up=UP, down=DOWN, unknown=UNKNOWN)
+    )
+    return out

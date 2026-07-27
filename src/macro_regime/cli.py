@@ -26,8 +26,14 @@ from macro_regime.signals.growth import (
     classify_growth_model_a,
     growth_model_b_fred_minimal,
     growth_model_c_simple_two_signal,
+    growth_model_d_amtmno_claims,
 )
-from macro_regime.signals.inflation import core_inflation_momentum, leading_inflation_composite
+from macro_regime.signals.inflation import (
+    cleveland_median_cpi_momentum,
+    commodity_core_composite,
+    core_inflation_momentum,
+    leading_inflation_composite,
+)
 from macro_regime.signals.regime import build_regime_series
 from macro_regime.utils.dates import normalize_month_end_index
 
@@ -132,6 +138,22 @@ def _growth_signals(wide: pd.DataFrame, config: dict, growth_model: str) -> dict
                 df_c.to_csv(PROCESSED_DIR / "growth_model_c_detail.csv")
                 out["growth_model_two_signal"] = df_c["growth_label"]
 
+    if growth_model in ("all", "model_d_amtmno_claims"):
+        d_conf = gmodels["model_d_amtmno_claims"]
+        amtmno = wide.get(d_conf["amtmno_series"])
+        claims = wide.get(d_conf["claims_series"])
+        if amtmno is not None and claims is not None:
+            df_d = growth_model_d_amtmno_claims(
+                amtmno.dropna(),
+                claims.dropna(),
+                amtmno_change_months=d_conf["amtmno_change_months"],
+                claims_change_months=d_conf["claims_change_months"],
+                zscore_window=zconf["rolling_window_months"],
+                zscore_min_periods=zconf["min_periods_months"],
+            )
+            df_d.to_csv(PROCESSED_DIR / "growth_model_d_detail.csv")
+            out["growth_model_amtmno_claims"] = df_d["growth_label"]
+
     # Growth models are sourced from a mix of FRED conventions -- some
     # (e.g. PERMIT, CFNAIMA3, and single-series models like the CLI) are
     # stamped first-of-month, others (anything resampled from weekly/daily
@@ -179,6 +201,33 @@ def _inflation_signals(wide: pd.DataFrame, config: dict, inflation_model: str) -
             df_ib.to_csv(PROCESSED_DIR / "inflation_model_b_detail.csv")
             out["inflation_model_leading_composite"] = df_ib["inflation_label"]
 
+    if inflation_model in ("all", "model_c_cleveland_median_cpi"):
+        c_conf = imodels["model_c_cleveland_median_cpi"]
+        median_cpi = wide.get(c_conf["median_cpi_series"])
+        if median_cpi is not None and median_cpi.dropna().shape[0] > 0:
+            df_ic = cleveland_median_cpi_momentum(
+                median_cpi.dropna(),
+                ma_window_months=c_conf["ma_window_months"],
+                lag_months=c_conf["lag_months"],
+            )
+            df_ic.to_csv(PROCESSED_DIR / "inflation_model_c_detail.csv")
+            out["inflation_model_cleveland_median_cpi"] = df_ic["inflation_label"]
+
+    if inflation_model in ("all", "model_d_commodity_core_aux"):
+        d_conf = imodels["model_d_commodity_core_aux"]
+        commodity = wide.get(d_conf["commodity_series"])
+        core_d = wide.get(d_conf["core_series"])
+        if commodity is not None and core_d is not None:
+            df_id = commodity_core_composite(
+                core_d.dropna(),
+                commodity.dropna(),
+                commodity_change_months=d_conf["commodity_change_months"],
+                zscore_window=zconf["rolling_window_months"],
+                zscore_min_periods=zconf["min_periods_months"],
+            )
+            df_id.to_csv(PROCESSED_DIR / "inflation_model_d_detail.csv")
+            out["inflation_model_commodity_core_aux"] = df_id["inflation_label"]
+
     # See the matching comment in `_growth_signals`: normalize every
     # inflation model's output index to month-end here so it shares a
     # convention with the (also-normalized) growth columns and with the
@@ -189,10 +238,20 @@ def _inflation_signals(wide: pd.DataFrame, config: dict, inflation_model: str) -
 @app.command("build-signals")
 def build_signals(
     growth_model: str = typer.Option(
-        "all", "--growth-model", help="all | model_a_cli | model_b_fred_minimal | model_c_simple_two_signal"
+        "all",
+        "--growth-model",
+        help=(
+            "all | model_a_cli | model_b_fred_minimal | "
+            "model_c_simple_two_signal | model_d_amtmno_claims"
+        ),
     ),
     inflation_model: str = typer.Option(
-        "all", "--inflation-model", help="all | model_a_realized_core | model_b_leading_composite"
+        "all",
+        "--inflation-model",
+        help=(
+            "all | model_a_realized_core | model_b_leading_composite | "
+            "model_c_cleveland_median_cpi | model_d_commodity_core_aux"
+        ),
     ),
 ) -> None:
     """Compute growth/inflation direction labels and combine them into

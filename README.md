@@ -29,6 +29,13 @@ independently -- there is no single blended "house regime" in this
 version. The priority is computing the signals correctly and measuring
 their forecast skill, not trading them.
 
+**Core model data source policy:** the two core operational models
+(Model A, Model B below) use only FRED-API-auto-fetched data. No
+external XLSX, manually-supplied CSV, or scraped data in a core model.
+Older models that require an optional external CSV remain in the
+codebase for baseline comparison, clearly labeled legacy/auxiliary --
+they are never part of the core Model A/B pairing.
+
 ## Growth Asset Basket
 
 When the growth axis is "Up", it is expressed as a single fixed-weight
@@ -91,18 +98,20 @@ pip install -e ".[dev]"
 ## Data sources
 
 - **FRED** (auto-fetched): Industrial Production, CFNAI, Initial Claims,
-  Building Permits, OECD CLI (US), Core CPI, Core PCE, headline
-  CPI, yield-curve spreads, 5Y breakeven inflation. Full list and roles in
+  Building Permits, OECD CLI (US), AMTMNO, Core CPI, Core PCE, headline
+  CPI, Cleveland Fed Median CPI, IMF commodity price index, yield-curve
+  spreads, 5Y breakeven inflation. Full list and roles in
   `docs/data_dictionary.md`. Series IDs are validated against the live
   FRED API on every `fetch` -- an invalid or retired ID fails loudly
-  rather than being silently swapped for something else.
-- **External CSVs** (optional, supplied locally, never committed):
+  rather than being silently swapped for something else. **Both core
+  models (Model A, Model B) are built entirely from this list** -- no
+  external file is required to compute or evaluate them.
+- **External CSVs** (optional, supplied locally, never committed; feed
+  only legacy/auxiliary models, never the core Model A/B pairing):
   - `data/external/conference_board_lei.csv` -- Conference Board LEI.
     **Not the same as FRED's `USSLIND`** (see below).
   - `data/external/ism_new_orders.csv`, `data/external/ism_prices_paid.csv`
     -- ISM sub-indices, not reliably available directly from FRED.
-  - `data/external/cleveland_fed_inflation_nowcast.csv` -- disabled by
-    default; see Methodology.
 
   Each file's absence disables only the model(s) that depend on it; the
   rest of the pipeline keeps running with a clear warning. Exact schemas
@@ -118,21 +127,31 @@ for the Conference Board LEI -- the LEI must be supplied via
 
 ## Growth models
 
-| Model | Inputs | Rule |
-|---|---|---|
-| A -- OECD CLI | `USALOLITOAASTSAM` (US) | Sign of `CLI_t - CLI_t-3`, with an optional 3m/6m-agreement stabilization rule |
-| B -- FRED Minimal | Initial Claims, Building Permits, CFNAI-MA3 | `mean(-z(Δ3m claims), z(Δ6m permits), z(CFNAI-MA3))` |
-| C -- Simple Two-Signal | ISM New Orders (CSV), Initial Claims | `(z(Δ3m ISM) - z(Δ3m claims)) / 2`; disabled without the ISM CSV |
+| Model | Inputs | Rule | Status |
+|---|---|---|---|
+| A -- OECD CLI | `USALOLITOAASTSAM` (US) | Sign of `CLI_t - CLI_t-3`, with an optional 3m/6m-agreement stabilization rule | Core (Model A) |
+| B -- FRED Minimal | Initial Claims, Building Permits, CFNAI-MA3 | `mean(-z(Δ3m claims), z(Δ6m permits), z(CFNAI-MA3))` | Baseline/proxy |
+| C -- Simple Two-Signal | ISM New Orders (CSV), Initial Claims | `(z(Δ3m ISM) - z(Δ3m claims)) / 2`; disabled without the ISM CSV | Legacy (external CSV) |
+| D -- AMTMNO + Claims | `AMTMNO`, Initial Claims | `mean(z(Δ3m AMTMNO), -z(Δ3m claims))`; fully FRED-native | Core (Model B) |
 
 ## Inflation models
 
-| Model | Inputs | Rule |
-|---|---|---|
-| A -- Realized Core Inflation Momentum | Core CPI | `core_3m_annualized - core_12m` |
-| B -- Leading Inflation Composite | ISM Prices Paid (CSV, optional), 5Y breakeven, Core CPI momentum | `mean(z(Δ3m ISM prices paid), z(Δ3m breakeven), z(core momentum))`; falls back to a 2-signal variant without ISM |
-| C -- Cleveland Fed Nowcast | Historical vintage CSV (not currently available) | Disabled: no official reproducible history found; see Methodology |
+| Model | Inputs | Rule | Status |
+|---|---|---|---|
+| A -- Realized Core Inflation Momentum | Core CPI | `core_3m_annualized - core_12m` | Core (Model B inflation axis) |
+| B -- Leading Inflation Composite | ISM Prices Paid (CSV, optional), 5Y breakeven, Core CPI momentum | `mean(z(Δ3m ISM prices paid), z(Δ3m breakeven), z(core momentum))`; falls back to a 2-signal variant without ISM | Baseline/proxy |
+| C -- Cleveland Median CPI Momentum | `MEDCPIM158SFRBCLE` | 3m MA of Median CPI vs. itself 3 months prior; **not** the Cleveland Fed Inflation Nowcast (see Methodology) | Core (Model A inflation axis) |
+| D -- Commodity + Core | `PALLFNFINDEXM`, Core CPI momentum | `mean(z(Δ3m commodity index), z(core momentum))`; **2-signal only, no ISM input** | Auxiliary/secondary |
 
 Full formulas, windows, and rationale: `docs/methodology.md`.
+
+**Core research models** (fully FRED-native, always computable from a
+live fetch alone): **Model A** = Growth CLI x Inflation Cleveland Median
+CPI (`regime_us_cli_cleveland_median_cpi`); **Model B** = Growth
+AMTMNO+Claims x Inflation Core Momentum
+(`regime_amtmno_claims_core_momentum`). FRED Minimal, ISM Simple
+Two-Signal, Leading Inflation Composite, and Commodity+Core remain
+active as legacy/auxiliary baselines only.
 
 ## Regime mapping
 
@@ -207,8 +226,6 @@ gap is closed.
 ## Current limitations
 
 - No full ALFRED real-time vintage panel yet.
-- Cleveland Fed Inflation Nowcast model is disabled pending an official,
-  reproducible historical vintage source.
 - `effective_date` is a calendar-day approximation, not a trading-day
   calendar.
 - Average lead-time diagnostic is a simple cross-correlation heuristic,

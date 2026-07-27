@@ -20,6 +20,12 @@ def _config() -> dict:
                 "claims_series": "ICSA",
                 "ism_new_orders_change_months": 3,
             },
+            "model_d_amtmno_claims": {
+                "amtmno_series": "AMTMNO",
+                "amtmno_change_months": 3,
+                "claims_series": "ICSA",
+                "claims_change_months": 3,
+            },
         },
         "inflation_models": {
             "model_a_realized_core": {
@@ -30,6 +36,16 @@ def _config() -> dict:
             "model_b_leading_composite": {
                 "breakeven_series": "T5YIE",
                 "breakeven_change_months": 3,
+                "core_series": "CPILFESL",
+            },
+            "model_c_cleveland_median_cpi": {
+                "median_cpi_series": "MEDCPIM158SFRBCLE",
+                "ma_window_months": 3,
+                "lag_months": 3,
+            },
+            "model_d_commodity_core_aux": {
+                "commodity_series": "PALLFNFINDEXM",
+                "commodity_change_months": 3,
                 "core_series": "CPILFESL",
             },
         },
@@ -55,6 +71,7 @@ def _synthetic_wide() -> pd.DataFrame:
     rng = np.random.default_rng(0)
     series = {
         "USALOLITOAASTSAM": pd.Series(100 + n * 0.05, index=months),
+        "AMTMNO": pd.Series(50000 + n * 100.0 + rng.normal(scale=200.0, size=len(months)), index=months),
         "PERMIT": pd.Series(1000 + n * 2.0 + rng.normal(scale=5.0, size=len(months)), index=months),
         "CFNAIMA3": pd.Series(((n.astype(int) % 5) - 2).astype(float), index=months),
         "CPILFESL": pd.Series(200 + n * 0.3 + rng.normal(scale=0.5, size=len(months)), index=months),
@@ -70,7 +87,11 @@ def test_kr_cli_growth_model_removed(monkeypatch, tmp_path):
     monkeypatch.setattr(cli_module, "PROCESSED_DIR", tmp_path)
     growth = cli_module._growth_signals(_synthetic_wide(), _config(), "all")
     assert "growth_model_kr_cli" not in growth
-    assert set(growth) == {"growth_model_us_cli", "growth_model_fred_minimal"}
+    assert set(growth) == {
+        "growth_model_us_cli",
+        "growth_model_fred_minimal",
+        "growth_model_amtmno_claims",
+    }
 
 
 def test_growth_and_inflation_outputs_share_one_row_per_month(monkeypatch, tmp_path):
