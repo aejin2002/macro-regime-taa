@@ -11,7 +11,8 @@ schema used.
 
 ## Purpose
 
-Two axes, classified monthly:
+Two axes, classified monthly, **using US growth and US inflation only**
+(no separate per-country regime):
 
 - **Growth:** Up / Down
 - **Inflation:** Up / Down
@@ -27,6 +28,29 @@ Each growth model is evaluated against each inflation model
 independently -- there is no single blended "house regime" in this
 version. The priority is computing the signals correctly and measuring
 their forecast skill, not trading them.
+
+## Growth Asset Basket
+
+When the growth axis is "Up", it is expressed as a single fixed-weight
+basket rather than a country-specific asset pick:
+
+- S&P 500
+- KOSPI 200
+
+There is no separate KOSPI-oriented regime -- KOSPI 200 is a constituent
+of this one basket, allocated against the same US Growth x US Inflation
+regime as the S&P 500. Weights are configured under `growth_basket` in
+`config/default.yaml`:
+
+```yaml
+growth_basket:
+  sp500_weight: 0.5
+  kospi200_weight: 0.5
+```
+
+The default is an untuned 50:50 split. This build does not compute
+basket returns, backtest the weights, or optimize them -- that is future
+work layered on top of this regime engine (see Future plans below).
 
 ## Installation
 
@@ -67,7 +91,7 @@ pip install -e ".[dev]"
 ## Data sources
 
 - **FRED** (auto-fetched): Industrial Production, CFNAI, Initial Claims,
-  Building Permits, OECD CLI (US & Korea), Core CPI, Core PCE, headline
+  Building Permits, OECD CLI (US), Core CPI, Core PCE, headline
   CPI, yield-curve spreads, 5Y breakeven inflation. Full list and roles in
   `docs/data_dictionary.md`. Series IDs are validated against the live
   FRED API on every `fetch` -- an invalid or retired ID fails loudly
@@ -96,7 +120,7 @@ for the Conference Board LEI -- the LEI must be supplied via
 
 | Model | Inputs | Rule |
 |---|---|---|
-| A -- OECD CLI | `USALOLITOAASTSAM` (US), `KORLOLITOAASTSAM` (KR) | Sign of `CLI_t - CLI_t-3`, with an optional 3m/6m-agreement stabilization rule |
+| A -- OECD CLI | `USALOLITOAASTSAM` (US) | Sign of `CLI_t - CLI_t-3`, with an optional 3m/6m-agreement stabilization rule |
 | B -- FRED Minimal | Initial Claims, Building Permits, CFNAI-MA3 | `mean(-z(Δ3m claims), z(Δ6m permits), z(CFNAI-MA3))` |
 | C -- Simple Two-Signal | ISM New Orders (CSV), Initial Claims | `(z(Δ3m ISM) - z(Δ3m claims)) / 2`; disabled without the ISM CSV |
 
@@ -201,3 +225,6 @@ Layered on top of this regime engine, not yet implemented:
 - **Price Confirmation** -- price/momentum filter before acting on a regime
 - **Crisis Gate** -- tail-risk override to suspend normal regime logic
   during acute stress
+- **Growth Asset Basket weight optimization** -- the S&P 500 / KOSPI 200
+  split in `growth_basket` (`config/default.yaml`) is a fixed, untuned
+  50:50 default; backtesting and optimizing that split is future work

@@ -29,6 +29,7 @@ from macro_regime.signals.growth import (
 )
 from macro_regime.signals.inflation import core_inflation_momentum, leading_inflation_composite
 from macro_regime.signals.regime import build_regime_series
+from macro_regime.utils.dates import normalize_month_end_index
 
 app = typer.Typer(add_completion=False, help="Growth/Inflation macro regime research CLI")
 console = Console()
@@ -95,11 +96,6 @@ def _growth_signals(wide: pd.DataFrame, config: dict, growth_model: str) -> dict
             out["growth_model_us_cli"] = classify_growth_model_a(
                 us_cli.dropna(), primary_window=a_conf["primary_window_months"]
             )
-        kr_cli = wide.get(a_conf["kr_series"])
-        if kr_cli is not None and kr_cli.dropna().shape[0] > 0:
-            out["growth_model_kr_cli"] = classify_growth_model_a(
-                kr_cli.dropna(), primary_window=a_conf["primary_window_months"]
-            )
 
     if growth_model in ("all", "model_b_fred_minimal"):
         b_conf = gmodels["model_b_fred_minimal"]
@@ -136,7 +132,16 @@ def _growth_signals(wide: pd.DataFrame, config: dict, growth_model: str) -> dict
                 df_c.to_csv(PROCESSED_DIR / "growth_model_c_detail.csv")
                 out["growth_model_two_signal"] = df_c["growth_label"]
 
-    return out
+    # Growth models are sourced from a mix of FRED conventions -- some
+    # (e.g. PERMIT, CFNAIMA3, and single-series models like the CLI) are
+    # stamped first-of-month, others (anything resampled from weekly/daily
+    # data, e.g. ICSA-derived claims) land on month-end. Normalizing every
+    # model's *output* index here, once, guarantees all growth columns
+    # share one convention before they are combined in `build_signals` and
+    # reindexed against evaluation targets in `evaluate` -- the same class
+    # of bug that `normalize_month_end_index` fixes inside
+    # `growth_model_b_fred_minimal` would otherwise resurface one layer up.
+    return {name: normalize_month_end_index(series) for name, series in out.items()}
 
 
 def _inflation_signals(wide: pd.DataFrame, config: dict, inflation_model: str) -> dict[str, pd.Series]:
@@ -174,7 +179,11 @@ def _inflation_signals(wide: pd.DataFrame, config: dict, inflation_model: str) -
             df_ib.to_csv(PROCESSED_DIR / "inflation_model_b_detail.csv")
             out["inflation_model_leading_composite"] = df_ib["inflation_label"]
 
-    return out
+    # See the matching comment in `_growth_signals`: normalize every
+    # inflation model's output index to month-end here so it shares a
+    # convention with the (also-normalized) growth columns and with the
+    # evaluation targets.
+    return {name: normalize_month_end_index(series) for name, series in out.items()}
 
 
 @app.command("build-signals")
@@ -240,7 +249,12 @@ def evaluate() -> None:
 
     report = EvaluationReport()
 
-    indpro = wide[econf["growth_target_series"]].dropna()
+    # Normalize to the same month-end convention as the (already-normalized)
+    # signal columns in `signals.csv` -- otherwise `.reindex(target.index)`
+    # below silently returns all-NaN predictions for any date convention
+    # mismatch, exactly as it did before `_growth_signals`/`_inflation_signals`
+    # started normalizing their output.
+    indpro = normalize_month_end_index(wide[econf["growth_target_series"]].dropna())
     growth_cols = [c for c in signals.columns if c.startswith("growth_model")]
     for horizon in econf["growth_horizons_months"]:
         target = growth_forward_target(indpro, horizon)
@@ -257,7 +271,7 @@ def evaluate() -> None:
             )
             report.add(ev)
 
-    core = wide[econf["inflation_target_series"]].dropna()
+    core = normalize_month_end_index(wide[econf["inflation_target_series"]].dropna())
     trailing_12m = core / core.shift(12) - 1.0
     inflation_cols = [c for c in signals.columns if c.startswith("inflation_model")]
     for horizon in econf["inflation_horizons_months"]:

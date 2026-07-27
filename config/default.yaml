@@ -18,7 +18,6 @@ series:
     PERMIT: { title: "New Private Housing Units Authorized by Building Permits", frequency: "m", units: "Thousands" }
     USPHCI: { title: "Coincident Economic Activity Index for the United States", frequency: "m", units: "Index" }
     USALOLITOAASTSAM: { title: "OECD Composite Leading Indicator, United States, Amplitude Adjusted", frequency: "m", units: "Index" }
-    KORLOLITOAASTSAM: { title: "OECD Composite Leading Indicator, Korea, Amplitude Adjusted", frequency: "m", units: "Index" }
   inflation:
     CPILFESL: { title: "Core CPI, Seasonally Adjusted", frequency: "m", units: "Index" }
     PCEPILFE: { title: "Core PCE Price Index", frequency: "m", units: "Index" }
@@ -39,7 +38,6 @@ cleveland_nowcast_csv: "data/external/cleveland_fed_inflation_nowcast.csv"
 growth_models:
   model_a_cli:
     us_series: "USALOLITOAASTSAM"
-    kr_series: "KORLOLITOAASTSAM"
     change_windows_months: [1, 3, 6]
     primary_window_months: 3
     stabilization_windows_months: [3, 6]
@@ -71,6 +69,16 @@ inflation_models:
       Inflation Nowcast has been located for this build. Only current scraped
       values are publicly available, and using those as if they were historical
       would introduce look-ahead bias. See docs/methodology.md.
+
+# Growth Asset Basket: the regime engine above classifies a single US
+# Growth x US Inflation regime (see docs/methodology.md). When the growth
+# axis is "Up", it is spent on this fixed-weight basket rather than a
+# single asset or a separate per-country regime. Weights are a structural
+# default only -- not tuned or backtested in this build; see "Planned
+# future layers" in docs/methodology.md.
+growth_basket:
+  sp500_weight: 0.5
+  kospi200_weight: 0.5
 
 zscore:
   min_periods_months: 60

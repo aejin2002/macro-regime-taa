@@ -10,7 +10,8 @@ trading system.
 
 ## Regime definition
 
-Two binary axes, classified monthly:
+Two binary axes, classified monthly from **US growth and US inflation
+only** -- there is no separate per-country regime:
 
 - **Growth**: Up / Down
 - **Inflation**: Up / Down
@@ -28,11 +29,24 @@ regime columns are named `regime_<growth_suffix>_<inflation_suffix>` and
 the mapping from column name to model pair is recorded in
 `data/processed/regime_metadata.json`.
 
+## Growth Asset Basket
+
+The growth axis is spent on a single fixed-weight basket -- S&P 500 +
+KOSPI 200 -- not a country-specific pick, and KOSPI 200 does not get its
+own regime. Both assets sit under the one US Growth x US Inflation
+classification above. Weights live in `growth_basket` in
+`config/default.yaml` (`sp500_weight` / `kospi200_weight`, default
+50:50, untuned in this build); see "Planned future layers" below for
+where weight optimization and basket-return backtesting fit in.
+
 ## Growth models
 
 **Model A -- OECD Composite Leading Indicator (CLI).**
-Uses `USALOLITOAASTSAM` (US) and `KORLOLITOAASTSAM` (Korea), both monthly,
-amplitude-adjusted OECD CLI series pulled directly from FRED.
+Uses `USALOLITOAASTSAM` (US), a monthly, amplitude-adjusted OECD CLI
+series pulled directly from FRED. There is no Korea CLI input and no
+separate KR growth regime -- KOSPI 200 is evaluated against this same US
+CLI signal as part of the Growth Asset Basket (see above), not against a
+Korea-specific growth call.
 
 - Primary rule: `cli_change_3m = CLI_t - CLI_t-3`. Up if positive, Down if
   negative, Unknown if insufficient data or exactly zero.
@@ -42,10 +56,6 @@ amplitude-adjusted OECD CLI series pulled directly from FRED.
   changes are positive, Down when both are negative; when they disagree,
   the previous non-Unknown state is carried forward (reduces whipsaw at
   the cost of a lag).
-- The US CLI is the default for US-asset regime work; the Korea CLI (or a
-  US/Korea combination) is intended for separate KOSPI-200-oriented
-  experiments and is produced as its own column, never blended silently
-  into the US regime.
 
 **Model B -- FRED Minimal.** Uses only series with no external-CSV
 dependency:
@@ -122,6 +132,23 @@ model is wanted, it must be supplied via
 `release_date`, `vintage_date`). Absent that file, a clear warning is
 raised and the model is skipped -- it is not silently disabled without
 explanation.
+
+## Date-index normalization
+
+FRED stamps native monthly series (e.g. `PERMIT`, `CFNAIMA3`,
+`USALOLITOAASTSAM`, `CPILFESL`) first-of-month, while series resampled
+from weekly/daily data (`ICSA`, `T5YIE`) land on month-end after
+resampling. `utils/dates.py::normalize_month_end_index` re-stamps a
+series to month-end regardless of which convention it started from, and
+is applied twice: inside each growth/inflation model that joins
+multiple raw series (`growth_model_b_fred_minimal`,
+`leading_inflation_composite`), and again to every model's *output*
+column plus the evaluation targets (`INDPRO`, `CPILFESL`) in
+`cli.py::_growth_signals` / `_inflation_signals` / `evaluate`. Skipping
+either layer produces the same failure mode: two economically identical
+months land on different index labels, so joins/reindexes silently
+return `NaN` instead of erroring, and the affected model evaluates with
+`n_obs = 0` even though its underlying signal is computed correctly.
 
 ## Standardization (z-scores)
 
@@ -206,3 +233,6 @@ not yet implemented:
   regime signal.
 - **Crisis Gate** -- a tail-risk override that can suspend normal regime
   logic during acute stress.
+- **Growth Asset Basket weight optimization** -- `growth_basket` in
+  `config/default.yaml` currently holds a fixed, untuned 50:50 S&P 500 /
+  KOSPI 200 split; no basket-return computation or backtest exists yet.

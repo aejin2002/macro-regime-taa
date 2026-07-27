@@ -10,8 +10,7 @@
 | `ICSA` | Initial Claims | Weekly | Number | Growth Models B/C input |
 | `PERMIT` | New Private Housing Units Authorized by Building Permits | Monthly | Thousands | Growth Model B input |
 | `USPHCI` | Coincident Economic Activity Index, US | Monthly | Index | Growth confirmation |
-| `USALOLITOAASTSAM` | OECD CLI, United States, Amplitude Adjusted | Monthly | Index | Growth Model A input (US) |
-| `KORLOLITOAASTSAM` | OECD CLI, Korea, Amplitude Adjusted | Monthly | Index | Growth Model A input (KR) |
+| `USALOLITOAASTSAM` | OECD CLI, United States, Amplitude Adjusted | Monthly | Index | Growth Model A input (US only -- no Korea CLI, no separate KR regime) |
 | `CPILFESL` | Core CPI, Seasonally Adjusted | Monthly | Index | Inflation Models A/B input, inflation target |
 | `PCEPILFE` | Core PCE Price Index | Monthly | Index | Alternate inflation core series |
 | `CPIAUCSL` | Headline CPI, Seasonally Adjusted | Monthly | Index | Diagnostic |
@@ -28,6 +27,15 @@ error rather than being silently dropped or substituted. Metadata
 `USSLIND` is intentionally **not** in this list -- see
 `docs/methodology.md` for why it must not be treated as the Conference
 Board LEI.
+
+## Growth Asset Basket (`config/default.yaml`, not a FRED series)
+
+`growth_basket.sp500_weight` / `growth_basket.kospi200_weight` (default
+0.5 / 0.5) are structural allocation weights for when the growth axis is
+"Up" -- S&P 500 and KOSPI 200 are both constituents of one basket, not
+separate per-country regime picks. No price series for either asset is
+fetched or used in this build; the weights are declared for the future
+asset-allocation layer only (see `docs/methodology.md`).
 
 ## External CSV inputs (optional, `data/external/`)
 
