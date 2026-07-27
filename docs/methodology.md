@@ -314,8 +314,15 @@ turnover after month 0.
 
 ### Fixed regime allocations
 
-Exactly as specified (`backtest.regime_allocations` in
-`config/default.yaml`), all rows sum to 100%:
+**These are ex-ante heuristic weights, not copied from any academic
+paper or third-party model.** Each percentage reflects the expected
+economic *direction* of that asset class under that regime (e.g.
+Treasuries and Gold overweighted in CONTRACTION, Commodities and TIPS
+overweighted when inflation is rising) -- a judgment call made in
+advance, not a value fit, backtested, or optimized against this
+project's data. Exactly as specified
+(`backtest.regime_allocations` in `config/default.yaml`), all rows sum
+to 100%:
 
 | | Growth Basket | High Yield | Inv. Grade | Interm. Treas. | Long Treas. | Gold | T-bills | Commodities | TIPS |
 |---|---|---|---|---|---|---|---|---|---|

@@ -196,17 +196,48 @@ Rate/Credit/Crisis overlay in this version.**
 
 Asset prices come from Yahoo Finance (`yfinance`) -- the only asset-price
 source in this repo; there is no existing internal price infrastructure
-to reuse. **The common backtest sample starts 2009-05**, not the
-BIL-inception-driven ~2007-06 originally expected: `069500.KS` (KODEX
-200) has a real Yahoo Finance data gap from 2007-03 through 2009-03
-(data resumes 2009-04), and the no-forward-fill rule means the common
-sample can't begin until that gap clears. **2008 (GFC) is therefore not
-covered by this backtest** -- only 2020 and 2022 of the three requested
-crisis years are (see `docs/methodology.md`, "Backtest", for the full
-finding). Monthly rebalance to target every month (restoring full target
-weights even when unchanged), one-way turnover x
+to reuse. **The common backtest sample runs 2009-05-31 to 2026-06-30**,
+not the BIL-inception-driven ~2007-06 start originally expected:
+`069500.KS` (KODEX 200) has a real Yahoo Finance data gap from 2007-03
+through 2009-03 (data resumes 2009-04), and the no-forward-fill rule
+means the common sample can't begin until that gap clears. **2008 (GFC)
+is therefore not covered by this backtest's sample** -- only 2020 and
+2022 of the three requested crisis years are. The end date is the last
+*fully elapsed* calendar month as of when the backtest is run (a
+still-in-progress current month is always excluded, never included as a
+partial-month return). See `docs/methodology.md`, "Backtest", for the
+full findings. Monthly rebalance to target every month (restoring full
+target weights even when unchanged), one-way turnover x
 `backtest.transaction_cost_bps` (10bp) transaction cost, every metric
 reported pre-cost and post-cost.
+
+**The per-regime allocation percentages (60/10/10/10/5/5 for
+GOLDILOCKS, etc.) are ex-ante heuristic weights based on each asset
+class's expected economic *direction* under that regime -- they are not
+copied from any academic paper or third-party model, and they are not
+fit, backtested, or optimized against this data.**
+
+### Results (v1.0, post-cost, 2009-05-31 to 2026-06-30)
+
+| Strategy | CAGR | Vol | Sharpe | Sortino | MaxDD | Calmar | Turnover/yr | Final Value |
+|---|---|---|---|---|---|---|---|---|
+| Primary | 9.92% | 9.92% | 0.879 | 1.334 | -15.71% | **0.632** | 2.03 | 5.07x |
+| Secondary | 9.18% | 10.39% | 0.779 | 1.171 | -19.75% | 0.465 | 3.18 | 4.51x |
+| Static 60/40 | **10.34%** | 11.06% | 0.835 | 1.233 | -24.74% | 0.418 | 0.17 | 5.42x |
+| Equal-weight | 5.63% | 6.26% | 0.707 | 1.098 | -13.95% | 0.404 | 0.15 | 2.56x |
+| Growth Basket B&H | **14.64%** | 16.48% | 0.839 | 1.256 | -27.48% | 0.533 | 0.03 | 10.44x |
+
+**Read this as a risk-management result, not a return-maximization
+one.** Primary's CAGR is *not* higher than Static 60/40's or Growth
+Basket buy-and-hold's -- it is lower than both. What Primary does show
+is a materially smaller max drawdown (-15.7% vs. -24.7% for Static 60/40
+and -27.5% for buy-and-hold), the best Calmar ratio of all five
+strategies, and a modestly higher Sharpe/Sortino than the passive
+alternatives -- i.e., comparable-to-better risk-adjusted return at
+substantially lower realized drawdown, not better absolute performance.
+Secondary does not show the same risk-adjusted edge as Primary in this
+sample. See `docs/methodology.md`, "Backtest", for the full metric
+definitions and caveats.
 
 ```bash
 python -m macro_regime.cli run-backtest
@@ -291,8 +322,9 @@ gap is closed.
   calendar.
 - Average lead-time diagnostic is a simple cross-correlation heuristic,
   not a formal causality test.
-- The backtest's common sample starts ~2007 (driven by `BIL`'s
-  inception), not the full 1990+ macro-signal history; no ETF
+- The backtest's common sample runs 2009-05-31 to 2026-06-30 (driven by
+  a real Yahoo Finance data gap in `069500.KS`, not the full 1990+
+  macro-signal history) -- **2008 (GFC) is not covered**; no ETF
   survivorship-bias modeling.
 - No Rate/Credit/Crisis overlay in the backtest yet -- see Future plans.
 - Past backtest performance does not represent live/real-time
