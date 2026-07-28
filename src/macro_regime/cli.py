@@ -43,6 +43,7 @@ from macro_regime.data.fred_series import (
 from macro_regime.duration_gate.backtest import run_bei_duration_gate_backtest
 from macro_regime.evaluation.lead_lag import growth_forward_target, inflation_forward_target
 from macro_regime.evaluation.report import EvaluationReport, evaluate_model
+from macro_regime.fast_crisis.backtest import run_fast_crisis_backtest
 from macro_regime.signals.growth import (
     classify_growth_model_a,
     cli_diagnostics,
@@ -82,6 +83,13 @@ BEI_DURATION_GATE_MONTHLY_RETURNS_PATH = PROCESSED_DIR / "bei_duration_gate_mont
 BEI_DURATION_GATE_ANNUAL_RETURNS_PATH = PROCESSED_DIR / "bei_duration_gate_annual_returns.csv"
 BEI_DURATION_GATE_SUMMARY_PATH = PROCESSED_DIR / "bei_duration_gate_summary.csv"
 BEI_DURATION_GATE_REGIME_ANALYSIS_PATH = PROCESSED_DIR / "bei_duration_gate_regime_analysis.csv"
+FAST_CRISIS_SIGNALS_PATH = PROCESSED_DIR / "fast_crisis_signals_daily.csv"
+FAST_CRISIS_ALLOCATIONS_PATH = PROCESSED_DIR / "fast_crisis_allocations_daily.csv"
+FAST_CRISIS_DAILY_RETURNS_PATH = PROCESSED_DIR / "fast_crisis_daily_returns.csv"
+FAST_CRISIS_MONTHLY_RETURNS_PATH = PROCESSED_DIR / "fast_crisis_monthly_returns.csv"
+FAST_CRISIS_SUMMARY_PATH = PROCESSED_DIR / "fast_crisis_summary.csv"
+FAST_CRISIS_TURNOVER_BREAKDOWN_PATH = PROCESSED_DIR / "fast_crisis_turnover_breakdown.csv"
+FAST_CRISIS_CURRENT_STATUS_PATH = PROCESSED_DIR / "fast_crisis_current_status.json"
 
 
 @app.command()
@@ -691,6 +699,71 @@ def run_bei_duration_gate_cmd(
         table.add_row(*[f"{row[c]:.4f}" if isinstance(row[c], float) else str(row[c]) for c in summary_cols])
     console.print(table)
     console.print(f"[green]Saved 6 BEI Duration Risk Gate output files to {PROCESSED_DIR}[/green]")
+
+
+@app.command("run-fast-crisis-overlay")
+def run_fast_crisis_overlay_cmd(
+    refresh_cache: bool = typer.Option(False, "--refresh-cache"),
+) -> None:
+    """Run the v1.2 Fast Crisis Overlay backtest: a daily-frequency,
+    2-of-3-signal (VIX/SPY/HYG shock) tail-risk brake on top of v1.1
+    (Primary v1.0 regime + BEI Duration Risk Gate) -- see
+    docs/methodology.md, "Fast Crisis Overlay (v1.2)". v1.1 itself is
+    rebuilt unmodified and never overwritten; this command only ever
+    writes `fast_crisis_*` files. Requires `build-regime-output` (for
+    regime_output_primary.csv) and `fetch` (for DGS10/T10YIE/VIXCLS in
+    fred_wide.csv) to have already run."""
+    if not REGIME_OUTPUT_PRIMARY_PATH.exists():
+        console.print("[red]Missing regime output. Run `build-regime-output` first.[/red]")
+        raise typer.Exit(code=1)
+    if not WIDE_PATH.exists():
+        console.print("[red]No fetched data found. Run `fetch` first (needed for DGS10/T10YIE/VIXCLS).[/red]")
+        raise typer.Exit(code=1)
+
+    config = load_config()
+    wide = pd.read_csv(WIDE_PATH, index_col=0, parse_dates=True)
+    missing_series = [s for s in ("DGS10", "T10YIE", "VIXCLS") if s not in wide.columns]
+    if missing_series:
+        console.print(
+            f"[red]{missing_series} not found in fred_wide.csv -- re-run `fetch` "
+            "(config/default.yaml's series.diagnostics must list them).[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    primary_df = pd.read_csv(REGIME_OUTPUT_PRIMARY_PATH, index_col=0, parse_dates=True)
+    primary_regime = primary_df["tradable_regime"]
+
+    console.print("[cyan]Fetching daily asset + FX prices from Yahoo Finance...[/cyan]")
+    result = run_fast_crisis_backtest(config, primary_regime, wide, refresh_cache=refresh_cache)
+
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    result.signal_table.to_csv(FAST_CRISIS_SIGNALS_PATH)
+    result.allocations.to_csv(FAST_CRISIS_ALLOCATIONS_PATH)
+    result.daily_returns.to_csv(FAST_CRISIS_DAILY_RETURNS_PATH)
+    result.monthly_returns.to_csv(FAST_CRISIS_MONTHLY_RETURNS_PATH)
+    result.summary.to_csv(FAST_CRISIS_SUMMARY_PATH, index=False)
+    result.turnover_breakdown.to_csv(FAST_CRISIS_TURNOVER_BREAKDOWN_PATH, index=False)
+    with FAST_CRISIS_CURRENT_STATUS_PATH.open("w", encoding="utf-8") as fh:
+        json.dump(result.current_status, fh, indent=2)
+
+    table = Table(title="Fast Crisis Overlay v1.2 vs. v1.1 (daily, post-cost)")
+    summary_cols = [
+        "strategy",
+        "start_date",
+        "end_date",
+        "cagr_post_cost",
+        "annualized_vol_post_cost",
+        "sharpe_post_cost",
+        "max_drawdown_daily_close_post_cost",
+        "max_drawdown_month_end_post_cost",
+        "final_value_post_cost",
+    ]
+    for col in summary_cols:
+        table.add_column(col)
+    for _, row in result.summary.iterrows():
+        table.add_row(*[f"{row[c]:.4f}" if isinstance(row[c], float) else str(row[c]) for c in summary_cols])
+    console.print(table)
+    console.print(f"[green]Saved 7 Fast Crisis Overlay output files to {PROCESSED_DIR}[/green]")
 
 
 @app.command("run-all")
