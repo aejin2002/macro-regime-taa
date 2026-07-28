@@ -33,6 +33,7 @@ sys.path.insert(0, str(ROOT / "app"))
 
 from ui import charts, components  # noqa: E402
 from ui.data_loader import (  # noqa: E402
+    benchmarks_artifact_source_info,
     data_freshness_summary,
     load_benchmarks_daily,
     load_pipeline_status,
@@ -214,6 +215,18 @@ with st.sidebar:
             "local build" if artifact_info["source"] == "local" else f"GitHub Release {artifact_info['tag']}"
         )
         st.caption(f"v1.3 artifact source: {source_label}  \nSHA256: `{artifact_info['sha256'][:12]}...`")
+
+    bench_artifact_info = benchmarks_artifact_source_info()
+    if bench_artifact_info:
+        bench_source_label = (
+            "local build"
+            if bench_artifact_info["source"] == "local"
+            else f"GitHub Release {bench_artifact_info['tag']}"
+        )
+        st.caption(
+            f"Benchmarks artifact source: {bench_source_label}  \n"
+            f"SHA256: `{bench_artifact_info['sha256'][:12]}...`"
+        )
 
     # Stale-cache warning: AssetPriceClient's on-disk cache has no TTL of
     # its own (see docs/methodology.md, "Secondary finding"), so this

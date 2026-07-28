@@ -25,10 +25,10 @@ from macro_regime.deployment import (  # noqa: E402
     ArtifactDownloadError,
     ArtifactValidationError,
     resolve_artifact_path,
+    resolve_benchmarks_artifact_path,
 )
 
 V1_2_PATH = PROCESSED_DIR / "v1_2_regression_daily.parquet"
-BENCHMARKS_PATH = PROCESSED_DIR / "benchmarks_daily.parquet"
 STATUS_PATH = PROCESSED_DIR / "update_all_status.json"
 
 
@@ -86,10 +86,36 @@ def load_v1_2_regression_daily() -> pd.DataFrame | None:
     return _read_parquet(str(V1_2_PATH), _mtime(V1_2_PATH))
 
 
+@st.cache_resource(show_spinner="Resolving benchmarks artifact...")
+def _resolved_benchmarks_artifact():
+    """Same pattern as `_resolved_v1_3_artifact`, independently: a local-
+    path check or a GitHub Release download for `benchmarks_daily.parquet`.
+    A benchmarks-resolution failure is isolated -- it never affects v1.3
+    strategy loading -- and is surfaced as `None` (unavailable) rather
+    than crashing the dashboard, matching the existing MALOX-isolation
+    design elsewhere in this app."""
+    try:
+        return resolve_benchmarks_artifact_path()
+    except (ArtifactDownloadError, ArtifactValidationError) as exc:
+        return exc
+
+
 def load_benchmarks_daily() -> pd.DataFrame | None:
-    if not BENCHMARKS_PATH.exists():
+    resolved = _resolved_benchmarks_artifact()
+    if isinstance(resolved, Exception):
         return None
-    return _read_parquet(str(BENCHMARKS_PATH), _mtime(BENCHMARKS_PATH))
+    return _read_parquet(str(resolved.path), _mtime(resolved.path))
+
+
+def benchmarks_artifact_source_info() -> dict | None:
+    """Diagnostics for the sidebar: where benchmarks_daily.parquet came
+    from (local vs. downloaded), which release tag, and its checksum."""
+    resolved = _resolved_benchmarks_artifact()
+    if isinstance(resolved, Exception):
+        return None
+    return {
+        "source": resolved.source, "tag": resolved.tag, "sha256": resolved.sha256, "path": str(resolved.path)
+    }
 
 
 def load_pipeline_status() -> dict | None:

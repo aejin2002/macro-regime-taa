@@ -29,16 +29,29 @@ def _write_valid_parquet(path: Path, *, strategy_version: str = "v1_3", n_rows: 
     return path.read_bytes()
 
 
+def _write_valid_benchmarks_parquet(
+    path: Path, *, benchmark_ids: tuple[str, ...] = al.BENCHMARKS_REQUIRED_IDS
+) -> bytes:
+    rows = []
+    for bid in benchmark_ids:
+        for d in pd.date_range("2026-01-01", periods=3):
+            rows.append({"date": d, "benchmark_id": bid, "daily_return": 0.0, "nav": 1.0, "available": True})
+    pd.DataFrame(rows).to_parquet(path, index=False)
+    return path.read_bytes()
+
+
 @pytest.fixture(autouse=True)
 def _isolated_paths(tmp_path, monkeypatch):
     """Every test gets its own local-path location and its own cache
     dir -- never the real project paths."""
     local_path = tmp_path / "local" / al.ASSET_NAME
+    bench_local_path = tmp_path / "local" / al.BENCHMARKS_ASSET_NAME
     cache_dir = tmp_path / "cache"
     monkeypatch.setattr(al, "LOCAL_PATH", local_path)
+    monkeypatch.setattr(al, "BENCHMARKS_LOCAL_PATH", bench_local_path)
     monkeypatch.setattr(al, "_runtime_cache_dir", lambda: cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    return {"local_path": local_path, "cache_dir": cache_dir}
+    return {"local_path": local_path, "bench_local_path": bench_local_path, "cache_dir": cache_dir}
 
 
 # -- local artifact exists ---------------------------------------------------
@@ -250,3 +263,147 @@ def test_streamlit_loader_uses_resolved_path(monkeypatch, tmp_path):
     df = data_loader.load_v1_3_daily()
     assert df is not None
     assert len(df) == 3
+
+
+# =============================================================================
+# benchmarks_daily.parquet -- same resolution contract, independent asset
+# =============================================================================
+
+
+def test_benchmarks_local_artifact_used_directly_no_network_call(_isolated_paths):
+    bench_local_path = _isolated_paths["bench_local_path"]
+    bench_local_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_valid_benchmarks_parquet(bench_local_path)
+
+    resolved = al.resolve_benchmarks_artifact_path()
+    assert resolved.source == "local"
+    assert resolved.path == bench_local_path
+
+
+def test_benchmarks_local_artifact_corrupt_does_not_silently_fall_back_to_remote(_isolated_paths):
+    bench_local_path = _isolated_paths["bench_local_path"]
+    bench_local_path.parent.mkdir(parents=True, exist_ok=True)
+    bench_local_path.write_bytes(b"not a parquet file")
+
+    with pytest.raises(al.ArtifactValidationError):
+        al.resolve_benchmarks_artifact_path()
+
+
+@responses.activate
+def test_benchmarks_local_missing_remote_download_succeeds(_isolated_paths):
+    content = _write_valid_benchmarks_parquet(Path(_isolated_paths["cache_dir"]) / "source.parquet")
+    responses.add(responses.GET, al._release_asset_url(al.BENCHMARKS_ASSET_NAME), body=content, status=200)
+
+    resolved = al.resolve_benchmarks_artifact_path(expected_sha256=None)
+    assert resolved.source == "github_release"
+    assert resolved.tag == al.RELEASE_TAG
+    assert resolved.path.exists()
+    assert resolved.path.read_bytes() == content
+
+
+@responses.activate
+def test_benchmarks_http_404_raises_download_error(_isolated_paths):
+    responses.add(responses.GET, al._release_asset_url(al.BENCHMARKS_ASSET_NAME), status=404)
+    with pytest.raises(al.ArtifactDownloadError, match="404"):
+        al.resolve_benchmarks_artifact_path(expected_sha256=None)
+
+
+@responses.activate
+def test_benchmarks_checksum_mismatch_raises_validation_error(_isolated_paths):
+    content = _write_valid_benchmarks_parquet(Path(_isolated_paths["cache_dir"]) / "source.parquet")
+    responses.add(responses.GET, al._release_asset_url(al.BENCHMARKS_ASSET_NAME), body=content, status=200)
+
+    with pytest.raises(al.ArtifactValidationError, match="SHA256 mismatch"):
+        al.resolve_benchmarks_artifact_path(expected_sha256="0" * 64)
+
+
+@responses.activate
+def test_benchmarks_missing_required_columns_raises_validation_error(_isolated_paths):
+    incomplete = pd.DataFrame({"date": pd.date_range("2026-01-01", periods=2), "benchmark_id": "us_60_40"})
+    buf = io.BytesIO()
+    incomplete.to_parquet(buf, index=False)
+    responses.add(
+        responses.GET, al._release_asset_url(al.BENCHMARKS_ASSET_NAME), body=buf.getvalue(), status=200
+    )
+
+    with pytest.raises(al.ArtifactValidationError, match="missing required columns"):
+        al.resolve_benchmarks_artifact_path(expected_sha256=None)
+
+
+@responses.activate
+def test_benchmarks_missing_required_id_raises_validation_error_not_silent_fallback(_isolated_paths):
+    content = _write_valid_benchmarks_parquet(
+        Path(_isolated_paths["cache_dir"]) / "source.parquet", benchmark_ids=("us_60_40", "spy")
+    )
+    responses.add(responses.GET, al._release_asset_url(al.BENCHMARKS_ASSET_NAME), body=content, status=200)
+
+    with pytest.raises(al.ArtifactValidationError, match="missing required benchmark_id"):
+        al.resolve_benchmarks_artifact_path(expected_sha256=None)
+
+
+def test_benchmarks_local_missing_ids_also_raises_not_silent_fallback(_isolated_paths):
+    bench_local_path = _isolated_paths["bench_local_path"]
+    bench_local_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_valid_benchmarks_parquet(bench_local_path, benchmark_ids=("us_60_40",))
+
+    with pytest.raises(al.ArtifactValidationError, match="missing required benchmark_id"):
+        al.resolve_benchmarks_artifact_path()
+
+
+@responses.activate
+def test_benchmarks_successful_download_leaves_no_temp_part_files(_isolated_paths):
+    content = _write_valid_benchmarks_parquet(Path(_isolated_paths["cache_dir"]) / "source.parquet")
+    responses.add(responses.GET, al._release_asset_url(al.BENCHMARKS_ASSET_NAME), body=content, status=200)
+
+    al.resolve_benchmarks_artifact_path(expected_sha256=None)
+    leftover = list(_isolated_paths["cache_dir"].glob("*.part"))
+    assert leftover == []
+
+
+@responses.activate
+def test_benchmarks_repeated_resolve_does_not_redownload(_isolated_paths):
+    content = _write_valid_benchmarks_parquet(Path(_isolated_paths["cache_dir"]) / "source.parquet")
+    responses.add(responses.GET, al._release_asset_url(al.BENCHMARKS_ASSET_NAME), body=content, status=200)
+    responses.add(responses.GET, al._release_asset_url(al.BENCHMARKS_ASSET_NAME), body=content, status=200)
+
+    al.resolve_benchmarks_artifact_path(expected_sha256=None)
+    al.resolve_benchmarks_artifact_path(expected_sha256=None)
+    assert len(responses.calls) == 1
+
+
+def test_v13_and_benchmarks_resolution_are_independent(_isolated_paths):
+    """v1.3 resolving from local while benchmarks is entirely missing (and
+    vice versa) must not affect each other -- confirmed by resolving v1.3
+    successfully while benchmarks has no local file and no HTTP mock."""
+    local_path = _isolated_paths["local_path"]
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_valid_parquet(local_path)
+
+    resolved = al.resolve_artifact_path()
+    assert resolved.source == "local"
+    assert not _isolated_paths["bench_local_path"].exists()
+
+
+def test_streamlit_loader_benchmarks_uses_resolved_path(monkeypatch, tmp_path):
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
+    from ui import data_loader
+
+    fake_path = tmp_path / "resolved_benchmarks.parquet"
+    _write_valid_benchmarks_parquet(fake_path)
+    fake_resolved = al.ResolvedArtifact(
+        path=fake_path, source="github_release", tag="v1.3.0", sha256="def456"
+    )
+
+    data_loader._resolved_benchmarks_artifact.clear()
+    monkeypatch.setattr(data_loader, "_resolved_benchmarks_artifact", lambda: fake_resolved)
+
+    info = data_loader.benchmarks_artifact_source_info()
+    assert info["source"] == "github_release"
+    assert info["tag"] == "v1.3.0"
+    assert info["path"] == str(fake_path)
+
+    df = data_loader.load_benchmarks_daily()
+    assert df is not None
+    assert set(df["benchmark_id"].unique()) == set(al.BENCHMARKS_REQUIRED_IDS)
