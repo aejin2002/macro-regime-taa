@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from macro_regime.fast_crisis.allocation import apply_fast_crisis_overlay
 from macro_regime.fast_crisis.signal import (
@@ -11,7 +12,9 @@ from macro_regime.fast_crisis.signal import (
     compute_credit_shock,
     compute_equity_shock,
     compute_vix_shock,
+    n_day_return_diagnostic,
     two_of_three,
+    vix_shock_diagnostics,
 )
 
 MIN_HOLD_DAYS = 10
@@ -77,6 +80,34 @@ def test_credit_shock_window_return_threshold():
     compounded = (1 - 0.007) ** 5 - 1
     assert compounded <= -0.03
     assert result.iloc[-1] == ON
+
+
+# -- display-only diagnostics (must not change any classification) --------
+
+
+def test_vix_shock_diagnostics_matches_the_values_compute_vix_shock_uses():
+    idx = _dates(25)
+    vix = pd.Series([20.0] * 24 + [45.0], index=idx)
+    diag = vix_shock_diagnostics(vix, ma_window_days=20)
+    expected_ma = vix.iloc[5:25].mean()  # rolling(20) window ending at (and including) the last day
+    assert diag["vix_level"].iloc[-1] == 45.0
+    assert diag["vix_ma"].iloc[-1] == pytest.approx(expected_ma)
+    assert diag["vix_ratio"].iloc[-1] == pytest.approx(45.0 / expected_ma - 1.0)
+    # same threshold check compute_vix_shock makes, done manually here
+    result = compute_vix_shock(vix, threshold=30.0, ma_window_days=20, ma_ratio_threshold=0.50)
+    assert result.iloc[-1] == ON
+    assert diag["vix_level"].iloc[-1] > 30.0 and diag["vix_ratio"].iloc[-1] > 0.50
+
+
+def test_n_day_return_diagnostic_matches_the_value_shock_functions_use():
+    idx = _dates(6)
+    daily_ret = [-0.015] * 5
+    returns = pd.Series([np.nan] + daily_ret, index=idx)
+    raw_value = n_day_return_diagnostic(returns, window_days=5)
+    expected = (1 - 0.015) ** 5 - 1
+    assert raw_value.iloc[-1] == pytest.approx(expected)
+    result = compute_equity_shock(returns, window_days=5, threshold=-0.07)
+    assert result.iloc[-1] == ON  # confirms diagnostic and classification agree
 
 
 # -- 2-of-3 trigger combination -------------------------------------------

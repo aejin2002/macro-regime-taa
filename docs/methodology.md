@@ -816,6 +816,199 @@ same snapshot a live dashboard would show).
   false-positive rate than the 2-of-3 rule's entries over the same
   sample.
 
+## Growth Participation (v1.3)
+
+Current production version, adopted after an independent robustness
+study of Candidate "Both +5" (`.analysis/growth_participation_robustness/`,
+itself following on from a recent-underperformance-attribution analysis
+that found v1.2's structural equity underweight -- not BEI or Fast
+Crisis -- as the dominant driver of recent lag vs. a 60/40 benchmark).
+
+**Exact change vs. v1.2** (`config/default.yaml`,
+`strategy_versions.v1_3.regime_allocation_overrides`):
+
+| Regime | Change |
+|---|---|
+| GOLDILOCKS | Growth Basket 60%→65%, tbills 5%→0% |
+| REFLATION | Growth Basket 40%→45%, tbills 5%→0% |
+| STAGFLATION | unchanged |
+| CONTRACTION | unchanged |
+| UNKNOWN | unchanged |
+
+Growth Basket's internal SPY 60% / KODEX200(USD) 40% split, BEI Duration
+Risk Gate, Fast Crisis Overlay (including its ON-day behavior: Growth
+Basket/HYG/DBC → 0, moved to BIL, GLD/TIP/LQD/IEF/TLT unchanged),
+transaction costs, and `t+1` execution are all identical to v1.2 -- the
+only thing v1.3 changes is which two rows of the regime allocation table
+are used. This is enforced structurally, not just by convention:
+`macro_regime.strategy_versions.build_versioned_config` deep-copies the
+loaded config and only ever overwrites `backtest.regime_allocations[
+"GOLDILOCKS"]`/`["REFLATION"]` for `version="v1_3"`; `version="v1_2"`
+returns an unmodified copy. `run_fast_crisis_backtest` itself is never
+edited or branched on version, so a v1.3 config change can never
+propagate into a v1.2 result -- v1.2 and v1.3 are always two
+independently-constructed config dicts passed through the same
+unmodified pipeline. `tests/test_v1_3_production.py` verifies live that
+CONTRACTION/STAGFLATION daily returns, BEI-gate-ON days, and Fast-
+Crisis-ON days are byte-identical between the two versions.
+
+**Adoption record** (Candidate "Both +5" robustness study; see
+`.analysis/growth_participation_robustness/report_ko.md` for the full
+20-section analysis -- pre-registered PASS criteria, parameter
+sensitivity at ±2.5pp/±5pp/±7.5pp/±10pp shifts, transaction-cost
+sensitivity at 0/10/25/50bp, execution-delay stress test, rolling
+36/60-month robustness, regime-attribution isolation checks):
+
+- Full CAGR: 10.80% → ~11.41%
+- Sharpe: 1.165 → ~1.184
+- Daily MDD: -16.64% → -16.64% (unchanged -- the full-period worst
+  drawdown episode occurs in a regime v1.3 never touches)
+- Last 3Y CAGR: 17.75% → ~18.93%
+- Last 5Y CAGR: 11.03% → ~11.70%
+- COVID MDD: -7.81% → ~-8.34%
+- 2022 performance: unchanged (2022 was Contraction/Stagflation-dominated)
+- Rolling 36-month CAGR win rate vs. v1.2: ~99.7%
+- Rolling 60-month CAGR win rate vs. v1.2: 100%
+- Calm-market (SPY monthly return 0-3%) upside capture vs. US 60/40: 79.7%
+
+> The candidate narrowly missed the pre-specified 80% calm-market
+> upside-capture threshold, but was adopted based on its higher CAGR,
+> improved Sharpe, unchanged full-period drawdown, strong rolling
+> consistency and limited degradation during crisis periods.
+
+These figures are recorded here as the study's own findings, for
+context. Every number the Streamlit dashboard or
+`data/processed/production_v13_daily.parquet` displays is computed live
+from the current engine and current data -- this table is never read by
+any product code path.
+
+**Daily/monthly separation fix**: the daily backtest previously computed
+`end_date = min(daily_returns.index.max(), v1_1_monthly_target.index.max())`
+-- since the monthly macro target can only ever be computed for a
+CLOSED calendar month, this silently truncated the ENTIRE daily
+NAV/benchmark/drawdown series at the last complete month, even on days
+the underlying daily asset-price data already covered (e.g. dashboard
+artifacts appeared frozen at the end of the last closed month while live
+market data for the following, still-open month was already available).
+Root cause confirmed by direct inspection, not guessed: it was not a
+stale on-disk cache (a *separate*, real issue was found and fixed too --
+see below), but this specific `end_date` computation. Fixed by (1)
+setting `end_date = daily_returns.index.max()` and (2) changing
+`_broadcast_monthly_onto_daily` so a daily date in a calendar month with
+no monthly value of its own yet holds the LAST available monthly value
+forward (previously it did an exact-month dict lookup that would
+`KeyError` on any such date, which is why `end_date` had to be capped in
+the first place). Holding a month's already-decided target forward
+introduces no lookahead -- it uses nothing from the still-open month.
+Verified: v1.2 daily returns for the closed-month period are unchanged
+to floating-point precision after the fix
+(`tests/test_v1_2_regression.py`), and the new `partial_month` column
+(`FastCrisisBacktest.allocations`, and in the canonical daily parquet
+artifact) flags exactly the open-month days now being served this way.
+
+**Secondary finding -- asset-price cache fragmentation**: independently
+of the above, `AssetPriceClient`'s on-disk cache is keyed on
+`(ticker, start_date)` with no expiry, so two different call sites
+requesting the same ticker with different `start` parameters can hold
+independently stale copies indefinitely (observed live: a `SPY` cache
+entry fetched with `start="2000-01-01"` was three days staler than one
+fetched with `start="2009-01-01"`, purely because of when each was last
+refreshed). This does not affect the product's own daily backtest (which
+always uses one consistent `start`), but it did initially leak into the
+new Benchmark Registry's US 60/40 series until `update-all` was fixed to
+always pass `refresh_cache=True`. Never rely on an un-refreshed cache
+call for a production artifact. `AssetPriceClient.get_cache_status` and
+`FileCache.cache_status` now expose retrieved-timestamp/cache-version/
+TTL-based staleness for any (ticker, start) entry, and the Streamlit
+sidebar warns if the cache entry the daily engine actually uses is
+older than 24h.
+
+**Observed vs. effective (lagged) macro signal**: `growth_state`/
+`inflation_state` in `regime_output_primary.csv` are each model's OWN
+unlagged monthly reading (never shifted). `macro_regime`, however, is
+`tradable_regime = raw_regime.shift(tradable_lag_months)` -- the regime
+actually in effect today was decided from LAST month's growth/inflation
+reading, not this month's. The canonical daily artifact
+(`production.build_v1_3_daily_artifact`) exposes both: `growth_state`/
+`inflation_state`/`growth_score`/`inflation_score` are the LAGGED,
+EFFECTIVE reading that actually explains `macro_regime` (verified for
+the entire history via `classify_regime(growth_state, inflation_state)
+== macro_regime`, `tests/test_production_growth_inflation_alignment.py`),
+while `growth_state_observed`/`inflation_state_observed` are the raw,
+most-recently-published reading, not yet acted on. The Streamlit Signals
+tab shows both, labeled "raw signal (unlagged)" vs. "effective month
+(lagged)", alongside the real underlying series value/comparison value/
+calculated change for each -- never just an internal model name.
+
+## Benchmark Registry
+
+`src/macro_regime/benchmarks/` (`BenchmarkDefinition`, `BenchmarkRegistry`,
+`BenchmarkSeries`, `BenchmarkMetrics`, `BenchmarkDataStatus`) replaces
+the single hardcoded 60/40 benchmark with a small, explicit registry --
+each definition records id, display name, category, data source,
+components/weights, calculation method, rebalance rule, transaction-cost
+rule, calendar rule, total-return treatment, known inception date,
+UI-visibility flag, default-selection flag, and relative-performance
+support. Adding a benchmark means adding one `BenchmarkDefinition`, not
+editing multiple Streamlit files.
+
+**User-facing (`ui_visible=True`)**:
+- **US 60/40** (`us_60_40`) -- SPY 60% / AGG 40%, monthly rebalance,
+  10bp transaction cost, daily valuation with drift between rebalances.
+  Default-selected everywhere; every default strategy comparison (NAV,
+  drawdown, CAGR, Sharpe, Sortino, MDD, relative NAV, annual/rolling
+  returns, upside/downside capture, crisis performance) uses this.
+- **MALOX** (`malox`) -- see below.
+- **SPY** (`spy`), **AGG** (`agg`) -- single-asset, buy-and-hold,
+  opt-in reference lines.
+
+**Internal-only (`ui_visible=False`)**: **Project 60/40**
+(`project_6040`, Growth Basket 60% + IEF 40%) -- the project's own
+original v1.0-v1.2 benchmark. Kept registered and fully functional (its
+series still comes straight from `FastCrisisBacktest.results[
+BENCHMARK_LABEL]`, computed by the unmodified `run_fast_crisis_backtest`)
+so historical `.analysis/` reports and the v1.0-v1.2 regression fixtures
+remain reproducible, but it is excluded from every user-facing surface:
+the Overview/Performance benchmark selectors, checkboxes, chart
+legends, the downloadable comparison export, and the pitch copy. Not
+deleted, not hidden behind a secret flag -- just never registered as
+`ui_visible`.
+
+### MALOX data treatment
+
+Ticker identity verified live against provider metadata before use:
+`quoteType == "MUTUALFUND"`, `longName == "BlackRock Global Allocation
+Fund"` -- the Institutional Shares class. Distribution-adjustment
+verified against an actual event (a $0.90/share distribution on
+2025-12-16): the auto-adjusted price for 2025-12-15 is reduced from the
+raw close by exactly that distribution, confirming the adjusted series
+is a genuine total-return series, not a naive close price. This is a
+single-event spot-check, not a full independent cross-provider
+reconciliation -- recorded as a limitation.
+
+Because MALOX is a mutual fund, not an ETF: one NAV is published per
+trading day (no intraday price), and that NAV can post up to a day
+later than the strategy's own market date (both a NYSE-vs-fund-NAV
+calendar difference and an ordinary end-of-day-pricing lag). Alignment
+rule: MALOX's own NAV series is forward-filled onto the strategy's
+calendar for VALUATION purposes only -- a day with no new published NAV
+is never treated as a real return; forward-filling a flat price
+naturally produces exactly 0.0% return on that day (not a special case
+in the code, a direct consequence of `ffill().pct_change()`), and that
+day is separately flagged `is_stale=True` so the UI can show a badge
+without ever implying a fabricated gain/loss. MALOX's own NAV is never
+backward-filled into a date before its first real observation. Every
+MALOX comparison (NAV chart, drawdown, relative performance, metric
+table) uses the common period between MALOX's own available history and
+the strategy's -- the strategy's/US 60/40's own full-period numbers are
+never silently truncated to MALOX's shorter or later-starting window.
+
+No synthetic rebalancing transaction cost is added to MALOX -- its
+reported NAV/adjusted total return already reflects the fund's real
+internal expense ratio; this project does not model an external
+investor's own sales load or platform fee on top of that, and the two
+should not be confused.
+
 ## Conference Board LEI vs. FRED USSLIND
 
 `USSLIND` on FRED is the **Philadelphia Fed's State Leading Indexes**

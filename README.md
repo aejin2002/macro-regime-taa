@@ -316,6 +316,79 @@ COVID shock; it stays non-negative excluding 2020, 2020+2022, and the
 most recent 24 months, so the benefit is not manufactured by a single
 event alone.
 
+## Growth Participation (v1.3) -- current production version
+
+**Macro Regime TAA v1.3** is the adopted production strategy. It changes
+exactly two allocation rows versus v1.2 -- GOLDILOCKS and REFLATION each
+get Growth Basket +5pp, funded entirely from `tbills` (BIL) -- and
+nothing else: CONTRACTION, STAGFLATION, and UNKNOWN are byte-identical
+to v1.2, and BEI Duration Gate / Fast Crisis Overlay / transaction costs
+/ execution lag are unchanged. See `src/macro_regime/strategy_versions.py`
+(the versioned config layer -- v1.2 stays frozen and independently
+reproducible; a v1.3 change can never propagate into a v1.2 result,
+since they are always two separately-constructed config dicts passed
+into the same unmodified `run_fast_crisis_backtest`) and
+`config/default.yaml`'s `strategy_versions.v1_3.regime_allocation_overrides`.
+
+**Adoption record** (from the Candidate "Both +5" robustness study,
+`.analysis/growth_participation_robustness/report_ko.md`):
+
+- Full CAGR: 10.80% → ~11.41%
+- Sharpe: 1.165 → ~1.184
+- Daily MDD: -16.64% → -16.64% (unchanged)
+- Last 3Y CAGR: 17.75% → ~18.93%
+- Last 5Y CAGR: 11.03% → ~11.70%
+- COVID MDD: -7.81% → ~-8.34%
+- 2022 performance: unchanged (2022 was Contraction/Stagflation-dominated -- v1.3 never touches those)
+- Rolling 36-month CAGR win rate vs v1.2: ~99.7%
+- Rolling 60-month CAGR win rate vs v1.2: 100%
+- Calm-market (SPY 0-3%/month) upside capture vs US 60/40: 79.7%
+
+> The candidate narrowly missed the pre-specified 80% calm-market
+> upside-capture threshold, but was adopted based on its higher CAGR,
+> improved Sharpe, unchanged full-period drawdown, strong rolling
+> consistency and limited degradation during crisis periods.
+
+The numbers above are recorded here for context only. Every figure the
+Streamlit dashboard or `data/processed/production_v13_daily.parquet`
+shows is computed live from the current engine and data -- nothing in
+the UI is hardcoded from this table.
+
+**Daily production artifact**: `production_v13_daily.parquet` combines
+the monthly macro signal (regime/growth/inflation/BEI gate, each held
+forward through the current, still-open calendar month -- no lookahead,
+see `fast_crisis.backtest._broadcast_monthly_onto_daily`) with genuinely
+daily portfolio valuation, so NAV/drawdown/benchmarks extend through the
+latest trading day rather than freezing at the last complete macro
+month. Build via:
+
+```bash
+python -m macro_regime.cli update-all
+```
+
+which also builds the immutable `v1_2_regression_daily.parquet` fixture
+and the `benchmarks_daily.parquet` artifact (US 60/40, MALOX, SPY, AGG,
+plus the internal-only `project_6040` used for historical-research
+reproducibility) -- see "Benchmark Registry" below.
+
+## Benchmark Registry
+
+`src/macro_regime/benchmarks/` replaces the old single hardcoded
+benchmark with a small, reusable registry (`BenchmarkDefinition` +
+`BenchmarkRegistry`) -- adding a new benchmark means adding one
+definition, not editing several Streamlit files. User-facing benchmarks:
+**US 60/40** (SPY 60%/AGG 40%, monthly rebalance, 10bp cost -- the
+default, always-shown comparison) and, opt-in, **MALOX** (BlackRock
+Global Allocation Fund, Institutional Shares -- a daily-NAV mutual fund,
+never backward-filled, a day with no new NAV is flagged stale rather
+than reporting a fabricated return, no synthetic rebalancing cost since
+the fund's own reported NAV/adjusted return is used as-is), **SPY**, and
+**AGG**. The project's original `static_6040` benchmark
+(`project_6040` in the registry) is kept registered for internal/
+research reproducibility only -- it is `ui_visible=False` and never
+appears in the Streamlit dashboard, though historical `.analysis/`
+reports and the v1.0-v1.2 regression fixtures still reference it freely.
+
 ## Running the pipeline
 
 ```bash
@@ -334,11 +407,26 @@ python -m macro_regime.cli build-regime-output
 python -m macro_regime.cli run-backtest
 python -m macro_regime.cli run-bei-duration-gate
 python -m macro_regime.cli run-fast-crisis-overlay
-python -m macro_regime.cli run-all   # fetch -> build-signals -> evaluate -> build-regime-output
+python -m macro_regime.cli run-all      # fetch -> build-signals -> evaluate -> build-regime-output
+python -m macro_regime.cli update-all   # the full v1.3 production pipeline (see below)
 ```
 
 Options: `--start-date`, `--end-date`, `--refresh-cache`,
 `--growth-model`, `--inflation-model`.
+
+`update-all` is the one command that rebuilds everything the Streamlit
+dashboard reads: macro + asset data fetch (`--refresh-cache` by default
+-- the on-disk asset-price cache has no TTL and is keyed by
+`(ticker, start-date)`, so a stale entry never expires on its own;
+always refreshing avoids silently serving old prices under a
+different-than-usual start-date cache key) → signals → regime output →
+the immutable v1.2 regression artifact → the v1.3 daily production
+artifact → US 60/40 + MALOX benchmark artifacts → freshness validation.
+It exits nonzero (writing no partial artifact) on any strategy-critical
+failure; a MALOX-specific failure is isolated and recorded as
+`available=False` rather than failing the whole run or silently reusing
+a stale value. Progress and the last result are written to
+`data/processed/update_all_status.json`.
 
 ## Streamlit app
 
@@ -346,6 +434,20 @@ Options: `--start-date`, `--end-date`, `--refresh-cache`,
 make app
 # equivalent to: streamlit run app/streamlit_app.py
 ```
+
+Six tabs: **Overview** (pitch + at-a-glance state), **Current
+Positioning** (target vs. drifted weights, risk state), **Markets**
+(Move by Asset grid, 1M/3M/6M/1Y/2Y/ALL, default 3M), **Performance**
+(Strategy vs. US 60/40 by default, MALOX/SPY/AGG opt-in, relative
+performance, benchmark metric table), **Signals** (Growth/Inflation
+evidence with the actual input series/observation/release/effective
+dates, Recent Signal Table), **Methodology** (v1.3 allocations, exact
+rules, benchmark definitions, MALOX data treatment, version history,
+limitations). Reads only the canonical parquet artifacts built by
+`update-all` -- it never fetches data or runs a backtest itself, and
+`st.cache_data` is keyed on each artifact's own file-modification time
+so a fresh pipeline run is picked up automatically. Project 60/40 is
+never shown anywhere in the app.
 
 Pages: Overview, Data Explorer, Growth Models, Inflation Models, Regime
 Comparison, Regime Output, Backtest, Duration Risk Gate, Evaluation,

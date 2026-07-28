@@ -23,6 +23,18 @@ OFF = "OFF"
 UNKNOWN = "UNKNOWN"
 
 
+def vix_shock_diagnostics(vix: pd.Series, *, ma_window_days: int) -> pd.DataFrame:
+    """Raw values underlying `compute_vix_shock` (VIX level, its trailing
+    `ma_window_days`-day average, and the ratio compared against
+    `ma_ratio_threshold`) -- display/diagnostic only, decides nothing
+    itself. `compute_vix_shock` computes this same rolling average and
+    ratio internally; this function exists so a caller (e.g. a UI) can
+    show the current numeric values without duplicating that formula."""
+    vix_ma = vix.rolling(ma_window_days, min_periods=ma_window_days).mean()
+    vix_ratio = vix / vix_ma - 1.0
+    return pd.DataFrame({"vix_level": vix, "vix_ma": vix_ma, "vix_ratio": vix_ratio})
+
+
 def compute_vix_shock(
     vix: pd.Series, *, threshold: float, ma_window_days: int, ma_ratio_threshold: float
 ) -> pd.Series:
@@ -30,10 +42,9 @@ def compute_vix_shock(
     where MA is the trailing `ma_window_days`-day simple average of VIX.
     UNKNOWN if fewer than `ma_window_days` valid VIX observations are
     available up to and including t."""
-    vix_ma = vix.rolling(ma_window_days, min_periods=ma_window_days).mean()
-    vix_ratio = vix / vix_ma - 1.0
+    diag = vix_shock_diagnostics(vix, ma_window_days=ma_window_days)
     out = []
-    for v, ma, r in zip(vix, vix_ma, vix_ratio, strict=True):
+    for v, ma, r in zip(diag["vix_level"], diag["vix_ma"], diag["vix_ratio"], strict=True):
         if pd.isna(v) or pd.isna(ma) or pd.isna(r):
             out.append(UNKNOWN)
         else:
@@ -41,13 +52,20 @@ def compute_vix_shock(
     return pd.Series(out, index=vix.index, name="vix_shock")
 
 
+def n_day_return_diagnostic(daily_return: pd.Series, *, window_days: int) -> pd.Series:
+    """The raw compounded `window_days`-trading-day return that
+    `compute_equity_shock`/`compute_credit_shock` threshold against --
+    display/diagnostic only, decides nothing itself."""
+    return (1.0 + daily_return).rolling(window_days, min_periods=window_days).apply(
+        lambda x: x.prod(), raw=True
+    ) - 1.0
+
+
 def _n_day_shock(daily_return: pd.Series, *, window_days: int, threshold: float, name: str) -> pd.Series:
     """shock[t] = compounded `window_days`-trading-day return of
     `daily_return` <= threshold. UNKNOWN if the full window is not yet
     available (warm-up period)."""
-    n_day_return = (1.0 + daily_return).rolling(window_days, min_periods=window_days).apply(
-        lambda x: x.prod(), raw=True
-    ) - 1.0
+    n_day_return = n_day_return_diagnostic(daily_return, window_days=window_days)
     out = [UNKNOWN if pd.isna(v) else (ON if v <= threshold else OFF) for v in n_day_return]
     return pd.Series(out, index=daily_return.index, name=name)
 

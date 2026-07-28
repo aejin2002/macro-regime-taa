@@ -781,5 +781,157 @@ def run_all(
     build_regime_output_cmd()
 
 
+@app.command("update-all")
+def update_all(
+    refresh_cache: bool = typer.Option(
+        True, "--refresh-cache/--no-refresh-cache",
+        help="Force a fresh fetch for every ticker/series (default) rather than trusting whatever is "
+             "on disk -- the on-disk asset-price cache is keyed by (ticker, start-date) with no TTL, "
+             "so a stale entry never expires on its own and can silently serve old data if this is off.",
+    ),
+) -> None:
+    """One-command production pipeline: macro data -> signals -> regime output ->
+    v1.2 regression artifact -> v1.3 daily production artifact -> US 60/40 + MALOX
+    benchmark artifacts -> freshness validation -> Streamlit-ready artifacts.
+
+    Exits nonzero (and writes no partial/misleading artifact) on any failure that
+    would affect the STRATEGY artifacts. A MALOX-specific failure is isolated --
+    recorded in the benchmark artifact as `available=False`, never silently
+    replaced by a stale prior value -- and does not fail the overall run, since the
+    strategy and US 60/40 are independently useful without it."""
+    import json
+    import time
+
+    from macro_regime.data.asset_prices import AssetPriceClient
+    from macro_regime.production import (
+        BENCHMARK_DAILY_PATH,
+        PRODUCTION_DAILY_PATH,
+        V1_2_REGRESSION_DAILY_PATH,
+        build_benchmark_daily_artifact,
+        build_v1_2_regression_daily_artifact,
+        build_v1_3_daily_artifact,
+        write_parquet,
+    )
+    from macro_regime.strategy_versions import DISPLAY_NAMES
+
+    status: dict = {"steps": {}, "started_at": pd.Timestamp.now().isoformat()}
+
+    def _fail(step: str, exc: Exception) -> None:
+        status["steps"][step] = {"ok": False, "error": str(exc)}
+        status["failed_at"] = step
+        (PROCESSED_DIR / "update_all_status.json").write_text(json.dumps(status, indent=2, default=str))
+        console.print(f"[red]FAILED at step '{step}': {exc}[/red]")
+        raise typer.Exit(code=1)
+
+    console.print("[bold]Step 1/8: strategy asset + macro data fetch[/bold]")
+    t0 = time.monotonic()
+    try:
+        fetch(refresh_cache=refresh_cache)
+    except Exception as exc:  # noqa: BLE001
+        _fail("macro_fetch", exc)
+    status["steps"]["macro_fetch"] = {"ok": True, "seconds": time.monotonic() - t0}
+
+    console.print("[bold]Step 2/8: build-signals[/bold]")
+    try:
+        build_signals(growth_model="all", inflation_model="all")
+    except Exception as exc:  # noqa: BLE001
+        _fail("build_signals", exc)
+    status["steps"]["build_signals"] = {"ok": True}
+
+    console.print("[bold]Step 3/8: evaluate (raw validation)[/bold]")
+    try:
+        evaluate()
+    except Exception as exc:  # noqa: BLE001
+        _fail("evaluate", exc)
+    status["steps"]["evaluate"] = {"ok": True}
+
+    console.print("[bold]Step 4/8: build-regime-output[/bold]")
+    try:
+        build_regime_output_cmd()
+    except Exception as exc:  # noqa: BLE001
+        _fail("build_regime_output", exc)
+    status["steps"]["build_regime_output"] = {"ok": True}
+
+    console.print("[bold]Step 5/8: v1.2 regression artifact[/bold]")
+    config = load_config()
+    wide = pd.read_csv(WIDE_PATH, index_col=0, parse_dates=True)
+    primary_df = pd.read_csv(PROCESSED_DIR / "regime_output_primary.csv", index_col=0, parse_dates=True)
+    client = AssetPriceClient()
+    as_of = pd.Timestamp.now()
+    try:
+        v1_2_df = build_v1_2_regression_daily_artifact(
+            config, primary_df["tradable_regime"], wide,
+            as_of=as_of, client=client, refresh_cache=refresh_cache,
+        )
+        write_parquet(v1_2_df, V1_2_REGRESSION_DAILY_PATH)
+    except Exception as exc:  # noqa: BLE001
+        _fail("v1_2_regression_build", exc)
+    status["steps"]["v1_2_regression_build"] = {
+        "ok": True, "rows": len(v1_2_df), "latest_date": str(v1_2_df["date"].max()),
+    }
+
+    console.print("[bold]Step 6/8: v1.3 daily production artifact[/bold]")
+    try:
+        v1_3_df, bt = build_v1_3_daily_artifact(
+            config, primary_df["tradable_regime"], wide, primary_df,
+            as_of=as_of, client=client, refresh_cache=refresh_cache,
+        )
+        write_parquet(v1_3_df, PRODUCTION_DAILY_PATH)
+    except Exception as exc:  # noqa: BLE001
+        _fail("v1_3_production_build", exc)
+    status["steps"]["v1_3_production_build"] = {
+        "ok": True, "rows": len(v1_3_df), "latest_date": str(v1_3_df["date"].max()),
+    }
+
+    console.print("[bold]Step 7/8: US 60/40 + MALOX benchmark artifacts[/bold]")
+    try:
+        calendar = pd.DatetimeIndex(v1_3_df["date"])
+        bench_df = build_benchmark_daily_artifact(
+            bt, calendar, as_of, client=client, refresh_cache=refresh_cache
+        )
+        write_parquet(bench_df, BENCHMARK_DAILY_PATH)
+    except Exception as exc:  # noqa: BLE001
+        # Benchmark artifacts are independently useful even if this whole
+        # step fails oddly -- but a total failure here (not just a single
+        # benchmark's own AssetPriceApiError, which compute_benchmark_series
+        # already isolates per-benchmark) is still worth surfacing loudly.
+        _fail("benchmark_build", exc)
+    malox_status = bench_df[bench_df["benchmark_id"] == "malox"]
+    malox_available = bool(malox_status["available"].iloc[0]) if len(malox_status) else False
+    status["steps"]["benchmark_build"] = {
+        "ok": True,
+        "benchmarks": sorted(bench_df["benchmark_id"].unique().tolist()),
+        "malox_available": malox_available,
+    }
+
+    console.print("[bold]Step 8/8: freshness validation[/bold]")
+    latest_market_date = pd.Timestamp(v1_3_df["date"].max())
+    latest_macro_month = pd.Timestamp(primary_df.index.max())
+    us_6040_latest = pd.Timestamp(bench_df.loc[bench_df["benchmark_id"] == "us_60_40", "date"].max())
+    # 1-day buffer only for benign fetch-order timing, not real staleness.
+    freshness_ok = (latest_market_date - us_6040_latest).days <= 1
+    status["steps"]["freshness_validation"] = {
+        "ok": bool(freshness_ok),
+        "strategy_latest_date": str(latest_market_date.date()),
+        "us_60_40_latest_date": str(us_6040_latest.date()),
+        "macro_latest_closed_month": str(latest_macro_month.date()),
+        "malox_available": malox_available,
+    }
+    if not freshness_ok:
+        _fail(
+            "freshness_validation",
+            RuntimeError(
+                f"US 60/40 latest date {us_6040_latest.date()} is stale vs "
+                f"strategy {latest_market_date.date()}"
+            ),
+        )
+
+    status["completed_at"] = pd.Timestamp.now().isoformat()
+    status["strategy_version"] = DISPLAY_NAMES["v1_3"]
+    (PROCESSED_DIR / "update_all_status.json").write_text(json.dumps(status, indent=2, default=str))
+    console.print(f"[green]update-all complete. Strategy market date: {latest_market_date.date()}, "
+                  f"US 60/40: {us_6040_latest.date()}, MALOX available: {malox_available}[/green]")
+
+
 if __name__ == "__main__":
     app()

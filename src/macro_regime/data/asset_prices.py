@@ -120,3 +120,23 @@ class AssetPriceClient:
         series = df.set_index("date")["close"].sort_index()
         series.name = ticker
         return series
+
+    def get_cache_status(self, ticker: str, start: str, *, ttl_seconds: float | None = None) -> dict | None:
+        """Retrieved timestamp / cache version / last market date / TTL
+        staleness for `ticker`'s cache entry at this `start`, without
+        fetching anything. Returns None if nothing is cached yet for this
+        exact (ticker, start) key -- callers should not assume a cache
+        exists just because `get_daily_close` has been called for a
+        DIFFERENT `start` value (each `start` is its own cache entry;
+        see `FileCache`'s docstring)."""
+        params = {"start": start}
+        cached = self.cache.get(ticker, params)
+        if cached is None:
+            return None
+        status = self.cache.cache_status(ticker, params, ttl_seconds=ttl_seconds) or {}
+        records = cached.get("records") or []
+        last_market_date = max((r["date"] for r in records), default=None)
+        status["ticker"] = ticker
+        status["start"] = start
+        status["last_market_date"] = last_market_date
+        return status
