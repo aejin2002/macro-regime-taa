@@ -1,4 +1,4 @@
-"""Macro Regime TAA v1.3 -- strategy pitch + live operating dashboard.
+"""Macro Regime TAA -- strategy pitch + live operating dashboard.
 
 Every number rendered here is read from the canonical parquet artifacts
 built by `python -m macro_regime.cli update-all`
@@ -10,12 +10,16 @@ widget change) only re-reads already-computed data; `st.cache_data` is
 keyed on each artifact's own mtime (see `ui/data_loader.py`) so a fresh
 pipeline run is picked up automatically without a manual cache-clear.
 
-Six tabs: Overview, Current Positioning, Markets, Performance, Signals,
-Methodology. Project 60/40 (`macro_regime.benchmarks.REGISTRY["project_6040"]`)
-is intentionally never rendered on any of them -- it stays registered
-only for internal/research reproducibility (`.analysis/*`, v1.0-v1.2
-regression). US 60/40 is the only default-selected comparison; MALOX/
-SPY/AGG are opt-in.
+Five tabs: Overview, Markets, Performance, Signals, Methodology. Overview
+leads with current position/state (regime, risk overlays, allocation,
+Growth/Inflation evidence) so a user sees "where the strategy stands
+right now" before any historical performance chart -- the former
+separate "Current Positioning" tab was folded into it; nothing that tab
+rendered was dropped, only its own tab slot. Project 60/40
+(`macro_regime.benchmarks.REGISTRY["project_6040"]`) is intentionally
+never rendered on any of them -- it stays registered only for internal/
+research reproducibility (`.analysis/*`, v1.0-v1.2 regression). US 60/40
+is the only default-selected comparison; MALOX/SPY/AGG are opt-in.
 """
 
 from __future__ import annotations
@@ -58,7 +62,7 @@ from macro_regime.fast_crisis.metrics import (  # noqa: E402
 )
 from macro_regime.strategy_versions import DISPLAY_NAMES  # noqa: E402
 
-st.set_page_config(page_title="Macro Regime TAA v1.3", layout="wide")
+st.set_page_config(page_title="Macro Regime TAA", page_icon="🩵", layout="wide")
 inject_css()
 
 ASSET_COLUMNS = [
@@ -250,8 +254,8 @@ with st.sidebar:
             f"run `update-all` to refresh before trusting the latest date."
         )
 
-tab_overview, tab_positioning, tab_markets, tab_performance, tab_signals, tab_methodology = st.tabs(
-    ["Overview", "Current Positioning", "Markets", "Performance", "Signals", "Methodology"]
+tab_overview, tab_markets, tab_performance, tab_signals, tab_methodology = st.tabs(
+    ["Overview", "Markets", "Performance", "Signals", "Methodology"]
 )
 
 
@@ -272,8 +276,7 @@ with tab_overview:
     )
     st.markdown(
         "성장과 물가 환경에 따라 기본 자산배분을 전환하고, "
-        "금리 위험과 금융시장 위기를 별도 레이어로 관리합니다.  \n"
-        "**Macro는 느리게. Crisis는 빠르게.**"
+        "금리 위험과 금융시장 위기를 별도 레이어로 관리합니다."
     )
     if bool(latest["partial_month"]):
         st.caption(
@@ -281,63 +284,99 @@ with tab_overview:
             "holds last month's decision forward."
         )
 
-    us6040 = bench_frame("us_60_40")
-    m_strategy = compute_metrics(STRATEGY_RETURNS, RISK_FREE, turnover=v13["daily_turnover"])
-    m_us6040 = compute_metrics(us6040["daily_return"], RISK_FREE) if us6040 is not None else {}
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("CAGR", fmt_pct(m_strategy.get("cagr")), border=True)
-    c2.metric("Sharpe", fmt_num(m_strategy.get("sharpe")), border=True)
-    c3.metric("Daily MDD", fmt_pct(m_strategy.get("max_drawdown_daily")), border=True)
-    c4.metric("Final Wealth", f"{m_strategy.get('final_wealth', float('nan')):.2f}x", border=True)
-
-    st.markdown("#### Comparison")
-    col_toggle, _ = st.columns([1, 3])
-    with col_toggle:
-        st.checkbox("US 60/40", value=True, disabled=True, key="ov_us6040")
-        show_malox_overview = (
-            st.checkbox("MALOX", value=False, key="ov_malox") if bench_available("malox") else False
+    # -- Current Positioning (folded in from the former separate tab) ------
+    # Every value below is read from `latest`/`freshness`/`config`, already
+    # computed by the pipeline -- nothing here recomputes a signal,
+    # allocation, or performance figure.
+    st.markdown("#### Current Risk State")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        components.render_status_card(
+            "Macro Regime",
+            str(latest["macro_regime"]),
+            None,
+            f"Effective since {fmt_date(freshness['current_macro_allocation_effective_from'])}",
+            components.regime_tone_for(str(latest["macro_regime"])),
+            compact=True,
         )
-        if not bench_available("malox"):
-            st.caption("MALOX unavailable")
+    with col2:
+        tone = "risk" if str(latest["fast_crisis_tradable"]) == "ON" else "good"
+        components.render_status_card(
+            "Fast Crisis",
+            str(latest["fast_crisis_tradable"]),
+            str(latest["fast_crisis_tradable"]),
+            f"Votes: {fmt_int(latest['fast_crisis_votes'])}/3",
+            tone,
+            compact=True,
+        )
+    with col3:
+        tone = "risk" if str(latest["bei_gate_tradable"]) == "ON" else "good"
+        components.render_status_card(
+            "BEI Duration Gate",
+            str(latest["bei_gate_tradable"]),
+            str(latest["bei_gate_tradable"]),
+            "Only tilts duration sleeve in Contraction",
+            tone,
+            compact=True,
+        )
 
-    nav_cols = {"Strategy v1.3": STRATEGY_NAV}
-    if us6040 is not None:
-        nav_cols["US 60/40"] = us6040["nav"].reindex(STRATEGY_NAV.index)
-    malox_series = bench_frame("malox")
-    common_period_note = ""
-    if show_malox_overview and malox_series is not None:
-        nav_cols["MALOX"] = malox_series["nav"].reindex(STRATEGY_NAV.index)
-        common_start = max(STRATEGY_NAV.index.min(), malox_series.index.min())
-        common_period_note = f" (MALOX comparison uses the common period from {fmt_date(common_start)})"
-    nav_df = pd.DataFrame(nav_cols)
-    st.plotly_chart(
-        charts.nav_chart(nav_df, f"Strategy vs Benchmarks -- NAV{common_period_note}", initial_days=365 * 3),
-        width="stretch",
-        key="ov_nav",
+    st.markdown("#### Last Rebalance / Next Expected Macro Update")
+    rebalance_days = v13[v13["rebalance_event"]]
+    last_rebalance = rebalance_days.index.max() if len(rebalance_days) else None
+    # Anchored to the CURRENT OPEN month (the latest artifact date), not the
+    # already-effective closed month -- `effective_date + 1 month` is the
+    # rebalance that already happened (== last_rebalance); the next one is
+    # one month further out, when the current open month itself closes.
+    current_open_month_start = v13.index.max().replace(day=1)
+    next_expected_macro_update = (
+        (current_open_month_start + pd.DateOffset(months=1)).replace(day=1)
+        if freshness["current_macro_allocation_effective_from"] is not None
+        else None
+    )
+    col_r1, col_r2 = st.columns(2)
+    col_r1.metric("Last rebalance event", fmt_date(last_rebalance))
+    col_r2.metric("Next expected macro update", fmt_date(next_expected_macro_update))
+
+    st.markdown("#### Current Partial-Month Performance")
+    if bool(latest["partial_month"]):
+        partial = v13.loc[
+            v13.index >= v13.index[v13.index.to_period("M") == v13.index[-1].to_period("M")].min(),
+            "daily_return_net",
+        ]
+        partial_cum = float((1 + partial).prod() - 1)
+        st.metric(f"Partial month through {fmt_date(v13.index.max())}", fmt_pct(partial_cum, signed=True))
+    else:
+        st.caption("Current month is complete; no partial-month figure to show.")
+
+    st.markdown("#### Growth Signal Evidence")
+    config = _cached_config()
+    g_conf = config["growth_models"]["model_a_cli"]
+    lag_months = config["regime_output"]["tradable_lag_months"]
+    effective_date = freshness["current_macro_allocation_effective_from"]
+    observed_date = v13.index.max()
+    components.render_evidence_card(
+        title=f"Why Growth is {latest['growth_state']} (currently effective)",
+        effective_value=str(latest["growth_state"]),
+        effective_since=effective_date,
+        observed_value=str(latest["growth_state_observed"]),
+        observed_as_of=observed_date,
+        expected_effective=next_expected_macro_update,
+        lag_months=lag_months,
+        score_label=f"Score {fmt_num(latest['growth_score'], 4)} -- {g_conf['us_series']} (OECD CLI, US)",
     )
 
-    dd_cols = {"Strategy v1.3": (STRATEGY_NAV / STRATEGY_NAV.cummax() - 1.0)}
-    if us6040 is not None:
-        u = us6040["nav"].reindex(STRATEGY_NAV.index)
-        dd_cols["US 60/40"] = u / u.cummax() - 1.0
-    dd_df = pd.DataFrame(dd_cols)
-    st.plotly_chart(charts.drawdown_chart(dd_df, initial_days=365 * 3), width="stretch", key="ov_dd")
-
-    st.markdown("#### Why Growth / Inflation")
-    gcol, icol = st.columns(2)
-    with gcol:
-        components.render_status_card(
-            "Growth", str(latest["growth_state"]), None,
-            f"score {fmt_num(latest['growth_score'], 3)} -- effective for the current regime "
-            f"(see Signals tab for full evidence)", "info",
-        )
-    with icol:
-        components.render_status_card(
-            "Inflation", str(latest["inflation_state"]), None,
-            f"score {fmt_pct(latest['inflation_score'])} -- effective for the current regime "
-            f"(see Signals tab for full evidence)", "info",
-        )
+    st.markdown("#### Inflation Signal Evidence")
+    i_conf = config["inflation_models"]["model_a_realized_core"]
+    components.render_evidence_card(
+        title=f"Why Inflation is {latest['inflation_state']} (currently effective)",
+        effective_value=str(latest["inflation_state"]),
+        effective_since=effective_date,
+        observed_value=str(latest["inflation_state_observed"]),
+        observed_as_of=observed_date,
+        expected_effective=next_expected_macro_update,
+        lag_months=lag_months,
+        score_label=f"Score {fmt_pct(latest['inflation_score'])} -- {i_conf['core_series']} (Core CPI, US)",
+    )
 
     st.markdown("#### Current Allocation")
     target_weights = {ASSET_DISPLAY[c]: latest[f"target_weight_{c}"] for c in ASSET_COLUMNS}
@@ -354,8 +393,22 @@ with tab_overview:
         )
     st.caption(
         "Target = the last rebalance decision. Drifted = actual current weights after price "
-        "movement since then. See the Current Positioning tab for the full breakdown."
+        "movement since then."
     )
+
+    st.markdown("#### Latest Contribution by Asset")
+    contrib = {ASSET_DISPLAY[c]: latest[f"asset_contribution_{c}"] for c in ASSET_COLUMNS}
+    st.plotly_chart(
+        charts.allocation_bar(contrib, "Latest-day contribution by asset"), width="stretch", key="pos_contrib"
+    )
+
+    # -- Rest of the existing Overview detail --------------------------------
+    m_strategy = compute_metrics(STRATEGY_RETURNS, RISK_FREE, turnover=v13["daily_turnover"])
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("CAGR", fmt_pct(m_strategy.get("cagr")), border=True)
+    c2.metric("Sharpe", fmt_num(m_strategy.get("sharpe")), border=True)
+    c3.metric("Daily MDD", fmt_pct(m_strategy.get("max_drawdown_daily")), border=True)
+    c4.metric("Final Wealth", f"{m_strategy.get('final_wealth', float('nan')):.2f}x", border=True)
 
     st.markdown("#### Move by Asset (preview)")
     preview_cols = st.columns(5)
@@ -384,89 +437,23 @@ with tab_overview:
 
 
 # =============================================================================
-# Tab 2 -- Current Positioning
-# =============================================================================
-
-with tab_positioning:
-    latest = v13.iloc[-1]
-    st.markdown("#### Latest Contribution by Asset")
-    contrib = {ASSET_DISPLAY[c]: latest[f"asset_contribution_{c}"] for c in ASSET_COLUMNS}
-    st.plotly_chart(
-        charts.allocation_bar(contrib, "Latest-day contribution by asset"), width="stretch", key="pos_contrib"
-    )
-
-    st.markdown("#### Current Risk State")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        components.render_status_card(
-            "Macro Regime",
-            str(latest["macro_regime"]),
-            None,
-            f"Effective since {fmt_date(freshness['current_macro_allocation_effective_from'])}",
-            "info",
-        )
-    with col2:
-        tone = "risk" if str(latest["fast_crisis_tradable"]) == "ON" else "good"
-        components.render_status_card(
-            "Fast Crisis",
-            str(latest["fast_crisis_tradable"]),
-            str(latest["fast_crisis_tradable"]),
-            f"Votes: {fmt_int(latest['fast_crisis_votes'])}/3",
-            tone,
-        )
-    with col3:
-        tone = "risk" if str(latest["bei_gate_tradable"]) == "ON" else "good"
-        components.render_status_card(
-            "BEI Duration Gate",
-            str(latest["bei_gate_tradable"]),
-            str(latest["bei_gate_tradable"]),
-            "Only tilts duration sleeve in Contraction",
-            tone,
-        )
-
-    st.markdown("#### Last Rebalance / Next Expected Update")
-    rebalance_days = v13[v13["rebalance_event"]]
-    last_rebalance = rebalance_days.index.max() if len(rebalance_days) else None
-    next_month = (
-        (
-            pd.Timestamp(freshness["current_macro_allocation_effective_from"]) + pd.DateOffset(months=1)
-        ).replace(day=1)
-        if freshness["current_macro_allocation_effective_from"] is not None
-        else None
-    )
-    col_r1, col_r2 = st.columns(2)
-    col_r1.metric("Last rebalance event", fmt_date(last_rebalance))
-    col_r2.metric("Next expected macro update", fmt_date(next_month))
-
-    st.markdown("#### Current Partial-Month Performance")
-    if bool(latest["partial_month"]):
-        month_start = v13.index[
-            v13["macro_regime"].index.to_period("M") == v13.index[-1].to_period("M")
-        ].min()
-        partial = v13.loc[
-            v13.index >= v13.index[v13.index.to_period("M") == v13.index[-1].to_period("M")].min(),
-            "daily_return_net",
-        ]
-        partial_cum = float((1 + partial).prod() - 1)
-        st.metric(f"Partial month through {fmt_date(v13.index.max())}", fmt_pct(partial_cum, signed=True))
-    else:
-        st.caption("Current month is complete; no partial-month figure to show.")
-
-
-# =============================================================================
-# Tab 3 -- Markets (Move by Asset)
+# Tab 2 -- Markets (Move by Asset)
 # =============================================================================
 
 
-@st.cache_data(show_spinner=False)
-def _load_vix(_mtime_key: float) -> pd.Series | None:
-    path = ROOT / "data" / "processed" / "fred_wide.csv"
-    if not path.exists():
-        return None
-    wide = pd.read_csv(path, index_col=0, parse_dates=True)
-    if "VIXCLS" not in wide.columns:
-        return None
-    return wide["VIXCLS"].dropna()
+# AGG/MALOX come from the deployment-safe `benchmarks_daily.parquet`
+# (local-first, GitHub Release fallback -- see `bench_frame`). VIX exists
+# in neither `benchmarks_daily.parquet` nor `production_v13_daily.parquet`
+# -- the only two artifacts this dashboard reads -- so it is deliberately
+# NOT wired to any raw CSV or live API here; selecting it shows a clear
+# "unavailable" message instead of fabricated data (see the final report
+# for the minimal artifact change that would add it).
+MARKET_SERIES_LABELS = {
+    "AGG — US Aggregate Bond ETF": "agg",
+    "MALOX — Allocation Fund NAV": "malox",
+    "VIX — CBOE Volatility Index": "vix",
+}
+MARKET_SERIES_UNIT = {"agg": "NAV index", "malox": "NAV index", "vix": "index level"}
 
 
 def _period_return(series: pd.Series, n_days: int | None) -> float | None:
@@ -532,38 +519,49 @@ with tab_markets:
                 )
                 st.plotly_chart(mini, width="stretch", key=f"mini_{asset}")
 
-    # AGG / MALOX / VIX -- different data shapes, own cards
-    extra_cols = st.columns(4)
-    agg_frame = bench_frame("agg")
-    with extra_cols[0]:
+    st.markdown("#### Benchmark & Volatility Charts")
+    selected_market_series = st.multiselect(
+        "Series",
+        list(MARKET_SERIES_LABELS.keys()),
+        default=["AGG — US Aggregate Bond ETF", "MALOX — Allocation Fund NAV"],
+        key="markets_bench_series",
+    )
+    if not selected_market_series:
+        st.caption("Select a series above to see its chart.")
+    # One independent figure per selected series -- never overlaid, never
+    # normalized against each other (different units: NAV index vs. a
+    # volatility level).
+    for label in selected_market_series:
+        series_key = MARKET_SERIES_LABELS[label]
+        unit_label = MARKET_SERIES_UNIT[series_key]
         with st.container(border=True):
-            st.markdown("**AGG**")
-            if agg_frame is not None:
-                st.caption(f"as of {fmt_date(agg_frame.index.max())}")
-                st.markdown(f"1D: {fmt_pct(agg_frame['daily_return'].iloc[-1], signed=True)}")
-            else:
+            if series_key == "vix":
+                st.markdown(f"**{label}**")
+                st.caption(
+                    "Data unavailable -- VIX is not currently included in the deployed "
+                    "production or benchmarks artifact. No raw CSV or live API fallback "
+                    "is used here; see Methodology for the minimal artifact change that "
+                    "would add it."
+                )
+                continue
+            frame = bench_frame(series_key)
+            if frame is None:
+                st.markdown(f"**{label}**")
                 st.caption("unavailable")
-    malox_frame = bench_frame("malox")
-    with extra_cols[1]:
-        with st.container(border=True):
-            st.markdown("**MALOX**  \n*daily NAV (mutual fund, not intraday)*")
-            if malox_frame is not None:
-                stale = bool(malox_frame["is_stale"].iloc[-1]) if "is_stale" in malox_frame.columns else False
-                label = fmt_date(malox_frame.index.max()) + (" ⚠️ stale" if stale else "")
-                st.caption(f"as of {label}")
-                st.markdown(f"1D: {fmt_pct(malox_frame['daily_return'].iloc[-1], signed=True)}")
-            else:
-                st.caption("unavailable")
-    _wide_path = ROOT / "data" / "processed" / "fred_wide.csv"
-    vix = _load_vix(_wide_path.stat().st_mtime if _wide_path.exists() else 0.0)
-    with extra_cols[2]:
-        with st.container(border=True):
-            st.markdown("**VIX**  \n*level, not a return asset*")
-            if vix is not None and len(vix):
-                st.caption(f"as of {fmt_date(vix.index.max())}")
-                st.markdown(f"Level: {fmt_num(vix.iloc[-1], 1)}")
-            else:
-                st.caption("unavailable")
+                continue
+            stale = (
+                bool(frame["is_stale"].iloc[-1])
+                if series_key == "malox" and "is_stale" in frame.columns
+                else False
+            )
+            as_of_label = fmt_date(frame.index.max()) + (" ⚠️ stale" if stale else "")
+            st.caption(f"as of {as_of_label}  ·  {unit_label}")
+            window = frame if n_days is None else frame.iloc[-n_days:]
+            st.plotly_chart(
+                charts.single_series_chart(window["nav"], f"{label} -- {unit_label}"),
+                width="stretch",
+                key=f"mkt_series_{series_key}",
+            )
 
     st.markdown("#### Normalized Performance (selected assets, rebased to 100)")
     selected_assets = st.multiselect(
@@ -607,7 +605,7 @@ with tab_markets:
 
 
 # =============================================================================
-# Tab 4 -- Performance
+# Tab 3 -- Performance
 # =============================================================================
 
 
@@ -787,7 +785,7 @@ with tab_performance:
 
 
 # =============================================================================
-# Tab 5 -- Signals
+# Tab 4 -- Signals
 # =============================================================================
 
 EVENT_TYPES = [
@@ -915,7 +913,7 @@ with tab_signals:
 
 
 # =============================================================================
-# Tab 6 -- Methodology
+# Tab 5 -- Methodology
 # =============================================================================
 
 with tab_methodology:

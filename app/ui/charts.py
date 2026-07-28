@@ -219,6 +219,34 @@ def drawdown_chart(
     return fig
 
 
+def single_series_chart(
+    series: pd.Series, title: str, *, y_tickformat: str | None = None, height: int = 300
+) -> go.Figure:
+    """One market/benchmark series (NAV, level, etc.) as its own
+    independent figure -- no overlay, no forced normalization against
+    other series. Caller pre-slices the date window (e.g. the shared
+    Markets Range selector) before passing `series` in; no embedded
+    range-selector buttons here, so it never conflicts with an external
+    period control."""
+    data = pd.to_numeric(series, errors="coerce").dropna()
+    fig = go.Figure()
+    if not data.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=data.index,
+                y=data.values,
+                mode="lines",
+                line=dict(color=COLORS["accent"], width=2),
+                hovertemplate="%{x|%Y-%m-%d}: %{y}<extra></extra>",
+            )
+        )
+    fig.update_layout(**plotly_layout(title=_title(title), height=height, showlegend=False))
+    plotly_axes(fig)
+    if y_tickformat:
+        fig.update_yaxes(tickformat=y_tickformat)
+    return fig
+
+
 def annual_returns_chart(annual_df: pd.DataFrame, title: str = "Annual Returns") -> go.Figure:
     palette = [COLORS["accent"], COLORS["sky"], "#B79ACC", "#E0A8A0"]
     fig = go.Figure()
