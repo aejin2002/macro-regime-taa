@@ -3,6 +3,7 @@ from macro_regime.deployment.artifact_loader import (
     ArtifactValidationError,
     ResolvedArtifact,
     resolve_artifact_path,
+    resolve_benchmarks_artifact_path,
 )
 
 __all__ = [
@@ -10,4 +11,5 @@ __all__ = [
     "ArtifactValidationError",
     "ResolvedArtifact",
     "resolve_artifact_path",
+    "resolve_benchmarks_artifact_path",
 ]

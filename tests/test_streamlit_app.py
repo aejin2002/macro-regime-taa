@@ -144,9 +144,82 @@ def test_partial_month_disclosure_renders_safely():
     assert not at.exception
 
 
-def test_current_positioning_tab_renders_target_and_drifted():
+def test_current_positioning_tab_renders_risk_state():
     at = _run()
     positioning = at.tabs[1]
     headers = [m.value for m in positioning.markdown if m.value and m.value.startswith("####")]
-    assert any("Target vs Drifted Allocation" in h for h in headers)
+    assert not any("Target vs Drifted Allocation" in h for h in headers)
     assert any("Current Risk State" in h for h in headers)
+
+
+def test_signals_tab_evidence_render_path_never_reads_fred_wide_csv():
+    """`app/streamlit_app.py` must not read data/processed/fred_wide.csv to
+    render Growth/Inflation Signal Evidence -- that file is gitignored and
+    never present in a deployment checkout. Source-level guard: no
+    fred_wide.csv path is constructed between the Growth Signal Evidence
+    header and the Inflation Signal Evidence block."""
+    start = APP_SOURCE.index('st.markdown("#### Growth Signal Evidence")')
+    end = APP_SOURCE.index('st.markdown("#### BEI Duration Gate")')
+    evidence_source = APP_SOURCE[start:end]
+    assert "fred_wide" not in evidence_source
+    assert "read_csv" not in evidence_source
+
+
+def test_signals_tab_shows_effective_and_observed_growth_signal():
+    at = _run()
+    signals = at.tabs[4]
+    body = " ".join(m.value for m in signals.markdown if m.value)
+    assert "Effective signal" in body
+    assert "Observed signal" in body
+    assert "Why Growth is" in body
+
+
+def test_signals_tab_shows_effective_and_observed_inflation_signal():
+    at = _run()
+    signals = at.tabs[4]
+    body = " ".join(m.value for m in signals.markdown if m.value)
+    assert "Why Inflation is" in body
+    assert body.count("Effective signal") == 2
+    assert body.count("Observed signal") == 2
+
+
+def test_signals_tab_evidence_shows_dates():
+    import pandas as pd
+
+    at = _run()
+    signals = at.tabs[4]
+    body = " ".join(m.value for m in signals.markdown if m.value)
+    v13 = pd.read_parquet(PROCESSED_DIR / "production_v13_daily.parquet")
+    observed_date = pd.to_datetime(v13["date"]).max().date().isoformat()
+    assert f"as of {observed_date}" in body
+
+
+def test_signals_tab_never_shows_csv_missing_warning():
+    at = _run()
+    signals = at.tabs[4]
+    warning_text = " ".join(w.value for w in signals.warning if w.value)
+    assert "fred_wide" not in warning_text
+    assert "not found" not in warning_text
+
+
+def test_signals_tab_renders_evidence_without_fred_wide_csv_present(tmp_path, monkeypatch):
+    """Even if fred_wide.csv is entirely absent (the real deployment
+    condition), the Signals tab must still show effective/observed
+    signals and dates -- no warning, no exception."""
+    wide_path = PROCESSED_DIR / "fred_wide.csv"
+    if not wide_path.exists():
+        pytest.skip("fred_wide.csv not present locally -- nothing to hide for this test")
+    backup = tmp_path / "fred_wide.csv.bak"
+    wide_path.rename(backup)
+    try:
+        at = _run()
+        assert not at.exception
+        signals = at.tabs[4]
+        body = " ".join(m.value for m in signals.markdown if m.value)
+        warning_text = " ".join(w.value for w in signals.warning if w.value)
+        assert "Effective signal" in body
+        assert "Observed signal" in body
+        assert "fred_wide" not in warning_text
+        assert "not found" not in warning_text
+    finally:
+        backup.rename(wide_path)
