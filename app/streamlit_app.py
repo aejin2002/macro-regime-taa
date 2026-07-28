@@ -30,6 +30,7 @@ from macro_regime.cli import (  # noqa: E402
     evaluate,
     fetch,
     run_backtest_cmd,
+    run_bei_duration_gate_cmd,
 )
 from macro_regime.config import MissingApiKeyError, load_config  # noqa: E402
 from macro_regime.signals.regime import (  # noqa: E402
@@ -61,6 +62,20 @@ BACKTEST_OUTPUT_PATHS = [
     BACKTEST_ALLOCATIONS_PRIMARY_PATH,
     BACKTEST_ALLOCATIONS_SECONDARY_PATH,
     BACKTEST_REGIME_ANALYSIS_PATH,
+]
+BEI_DURATION_GATE_SIGNALS_PATH = PROCESSED_DIR / "bei_duration_gate_signals.csv"
+BEI_DURATION_GATE_ALLOCATIONS_PATH = PROCESSED_DIR / "bei_duration_gate_allocations.csv"
+BEI_DURATION_GATE_MONTHLY_RETURNS_PATH = PROCESSED_DIR / "bei_duration_gate_monthly_returns.csv"
+BEI_DURATION_GATE_ANNUAL_RETURNS_PATH = PROCESSED_DIR / "bei_duration_gate_annual_returns.csv"
+BEI_DURATION_GATE_SUMMARY_PATH = PROCESSED_DIR / "bei_duration_gate_summary.csv"
+BEI_DURATION_GATE_REGIME_ANALYSIS_PATH = PROCESSED_DIR / "bei_duration_gate_regime_analysis.csv"
+BEI_DURATION_GATE_OUTPUT_PATHS = [
+    BEI_DURATION_GATE_SIGNALS_PATH,
+    BEI_DURATION_GATE_ALLOCATIONS_PATH,
+    BEI_DURATION_GATE_MONTHLY_RETURNS_PATH,
+    BEI_DURATION_GATE_ANNUAL_RETURNS_PATH,
+    BEI_DURATION_GATE_SUMMARY_PATH,
+    BEI_DURATION_GATE_REGIME_ANALYSIS_PATH,
 ]
 
 REGIME_COLORS = {
@@ -149,6 +164,71 @@ def _ensure_backtest_data() -> None:
             run_backtest_cmd(refresh_cache=False)
     except Exception as exc:  # noqa: BLE001 -- caught only to surface it via st.exception, never swallowed
         st.error("Failed to build backtest outputs.")
+        st.exception(exc)
+        st.stop()
+
+    st.rerun()
+
+
+def _wide_has_bei_gate_series() -> bool:
+    """Whether fred_wide.csv already has the DGS10/T10YIE columns the
+    Duration Risk Gate needs. A pre-existing fred_wide.csv from before
+    these series were added to config/default.yaml's series list would
+    otherwise look "already fetched" to `_ensure_core_data`'s cheap
+    fast-path check (which only looks at signals.csv /
+    regime_output_primary.csv), silently leaving the gate without its
+    required inputs."""
+    if not WIDE_PATH.exists():
+        return False
+    try:
+        header = pd.read_csv(WIDE_PATH, nrows=0).columns
+    except Exception:  # noqa: BLE001 -- treat any read failure as "not ready", never crash the check itself
+        return False
+    return "DGS10" in header and "T10YIE" in header
+
+
+def _ensure_bei_duration_gate_data() -> None:
+    """Run the v1.1 BEI Duration Risk Gate pipeline if any of its 6
+    output files are missing, or if fred_wide.csv predates DGS10/T10YIE
+    being added to the configured series list. Checks the filesystem
+    directly on every call (not `@st.cache_resource`-memoized), same
+    reasoning as `_ensure_backtest_data`: a Streamlit Community Cloud
+    reboot can wipe the ephemeral filesystem out from under an
+    otherwise still-running process, and only the filesystem -- not an
+    in-memory flag -- can be trusted to notice that.
+
+    Reuses `_ensure_core_data()` for the shared FRED fetch + regime
+    output step (no duplicate core bootstrap), and only re-fetches on
+    its own if that step's cheap existence check left fred_wide.csv
+    without DGS10/T10YIE. On success, triggers `st.rerun()`. On
+    failure, surfaces the real exception via `st.exception` and halts."""
+    if all(p.exists() for p in BEI_DURATION_GATE_OUTPUT_PATHS) and _wide_has_bei_gate_series():
+        return
+
+    core_error = _ensure_core_data()
+    if core_error:
+        st.error(f"Couldn't build the core data needed for the Duration Risk Gate: {core_error}")
+        st.stop()
+
+    if not _wide_has_bei_gate_series():
+        st.info("Fetching DGS10/T10YIE (needed for the Duration Risk Gate)...")
+        try:
+            with st.spinner("Fetching FRED data..."):
+                fetch(start_date=None, end_date=None, refresh_cache=False)
+        except MissingApiKeyError as exc:
+            st.error(f"Couldn't fetch FRED data: {exc}")
+            st.stop()
+        except Exception as exc:  # noqa: BLE001 -- surfaced via st.exception, never swallowed
+            st.error("Failed to fetch DGS10/T10YIE.")
+            st.exception(exc)
+            st.stop()
+
+    st.info("Building BEI Duration Risk Gate outputs. This may take 1-2 minutes...")
+    try:
+        with st.spinner("Fetching asset/FX prices and running the v1.1 backtest..."):
+            run_bei_duration_gate_cmd(refresh_cache=False)
+    except Exception as exc:  # noqa: BLE001 -- surfaced via st.exception, never swallowed
+        st.error("Failed to build BEI Duration Risk Gate outputs.")
         st.exception(exc)
         st.stop()
 
@@ -491,6 +571,170 @@ def page_backtest(
             st.dataframe(regime_analysis, use_container_width=True)
 
 
+def _gate_reasoning(row: pd.Series) -> str:
+    """Human-readable ON/OFF/UNKNOWN reasoning for one row of
+    bei_duration_gate_signals.csv, checking the same four conditions
+    `duration_gate.signal.classify_raw_bei_duration_gate` uses."""
+    fields = ["dgs10_change_1m", "bei_change_1m", "bei_change_3m", "tlt_return_1m"]
+    if any(pd.isna(row.get(f)) for f in fields):
+        missing = [f for f in fields if pd.isna(row.get(f))]
+        return f"UNKNOWN -- missing: {', '.join(missing)}"
+    checks = [
+        ("DGS10 1m change > 0", row["dgs10_change_1m"] > 0),
+        ("TLT 1m return < 0", row["tlt_return_1m"] < 0),
+        ("T10YIE 1m change > 0", row["bei_change_1m"] > 0),
+        ("T10YIE 3m change > 0", row["bei_change_3m"] > 0),
+    ]
+    lines = [f"{'PASS' if ok else 'fail'}: {label}" for label, ok in checks]
+    return " | ".join(lines)
+
+
+def page_duration_risk_gate(
+    signal_table: pd.DataFrame | None,
+    allocations: pd.DataFrame | None,
+    summary: pd.DataFrame | None,
+    annual_returns: pd.DataFrame | None,
+    monthly_returns: pd.DataFrame | None,
+    regime_analysis: pd.DataFrame | None,
+) -> None:
+    st.title("Duration Risk Gate (v1.1, experimental)")
+    st.caption(
+        "v1.1 does not predict interest rate levels and does not change the "
+        "Primary macro regime or any asset outside the nominal-Treasury "
+        "duration sleeve (intermediate_treasury + long_treasury). It only "
+        "reduces that sleeve's duration when DGS10 confirms a long-end rate "
+        "rise, TLT's own price actually falls, and T10YIE -- the market's "
+        "**inflation compensation** embedded in nominal vs. TIPS yields, "
+        "not a pure survey- or model-based expected-inflation measure -- "
+        "is rising on both a 1-month and 3-month window. When the gate is "
+        "OFF or UNKNOWN, v1.0's original allocation is used unchanged. The "
+        "signal is applied one month after it is confirmed (tradable_gate[t] "
+        "= raw_gate[t-1]); a still-in-progress month is never used. The "
+        "1-month/3-month windows and the 30%/70% IEF/BIL split are "
+        "ex-ante heuristics fixed before any backtest was run, not values "
+        "optimized to past performance. See the Methodology page, 'BEI "
+        "Duration Risk Gate (v1.1)', for full caveats."
+    )
+
+    if signal_table is None or allocations is None:
+        st.warning(
+            "Duration Risk Gate output not found. Run `python -m macro_regime.cli "
+            "run-bei-duration-gate` (after `build-regime-output` and `fetch`)."
+        )
+        return
+
+    st.header("Current status")
+    latest_date = signal_table.index.max()
+    latest_signal = signal_table.loc[latest_date] if pd.notna(latest_date) else None
+    latest_alloc = (
+        allocations.loc[latest_date] if pd.notna(latest_date) and latest_date in allocations.index else None
+    )
+    st.caption(f"Latest completed signal month: **{latest_date.date() if pd.notna(latest_date) else 'n/a'}**")
+
+    if latest_signal is not None:
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Raw gate (this month)", str(latest_signal["raw_bei_duration_gate"]))
+        with col2:
+            st.metric("Tradable gate (applied)", str(latest_signal["tradable_bei_duration_gate"]))
+        with col3:
+            st.metric("DGS10 1m change", f"{latest_signal['dgs10_change_1m']:.3f}")
+        with col4:
+            st.metric("TLT 1m return", f"{latest_signal['tlt_return_1m']:.2%}")
+        col5, col6 = st.columns(2)
+        with col5:
+            st.metric("T10YIE 1m change", f"{latest_signal['bei_change_1m']:.3f}")
+        with col6:
+            st.metric("T10YIE 3m change", f"{latest_signal['bei_change_3m']:.3f}")
+        st.caption(f"Raw gate reasoning: {_gate_reasoning(latest_signal)}")
+
+    if latest_alloc is not None:
+        st.caption(
+            f"Macro regime: **{latest_alloc['macro_regime']}** | "
+            f"gate state applied this month: **{latest_alloc['gate_state']}** | "
+            f"base IEF/TLT/BIL: {latest_alloc['base_IEF']:.2%} / "
+            f"{latest_alloc['base_TLT']:.2%} / {latest_alloc['base_BIL']:.2%} -> "
+            f"final IEF/TLT/BIL: {latest_alloc['final_IEF']:.2%} / "
+            f"{latest_alloc['final_TLT']:.2%} / {latest_alloc['final_BIL']:.2%}"
+        )
+
+    st.divider()
+    st.header("Performance: v1.0 Primary vs. v1.1 BEI Duration Risk Gate")
+    if summary is not None:
+        display_cols = [
+            "strategy",
+            "start_date",
+            "end_date",
+            "cagr_post_cost",
+            "annualized_vol_post_cost",
+            "sharpe_post_cost",
+            "sortino_post_cost",
+            "max_drawdown_post_cost",
+            "calmar_post_cost",
+            "avg_annual_turnover",
+            "final_value_post_cost",
+        ]
+        st.dataframe(summary[[c for c in display_cols if c in summary.columns]], use_container_width=True)
+        with st.expander("Full summary (pre-cost vs. post-cost)"):
+            st.dataframe(summary, use_container_width=True)
+
+    if monthly_returns is not None:
+        cumulative = (1 + monthly_returns.fillna(0)).cumprod()
+        st.subheader("Cumulative return (post-cost, starts at 1.0)")
+        fig_cum = go.Figure()
+        for col in cumulative.columns:
+            fig_cum.add_trace(go.Scatter(x=cumulative.index, y=cumulative[col], mode="lines", name=col))
+        st.plotly_chart(fig_cum, use_container_width=True)
+
+        st.subheader("Drawdown from running peak")
+        drawdown = cumulative / cumulative.cummax() - 1.0
+        fig_dd = go.Figure()
+        for col in drawdown.columns:
+            fig_dd.add_trace(go.Scatter(x=drawdown.index, y=drawdown[col], mode="lines", name=col))
+        st.plotly_chart(fig_dd, use_container_width=True)
+
+    if annual_returns is not None:
+        st.subheader("Annual returns")
+        st.dataframe(annual_returns, use_container_width=True)
+
+    if regime_analysis is not None:
+        st.subheader("Period breakdown")
+        period_rows = regime_analysis[regime_analysis["analysis_type"].str.startswith("period_")]
+        if not period_rows.empty:
+            pivoted = period_rows.pivot_table(
+                index="key", columns=["analysis_type", "series"], values="value", aggfunc="first"
+            )
+            st.dataframe(pivoted, use_container_width=True)
+        with st.expander("Regime-average returns / period breakdown (full table)"):
+            st.dataframe(regime_analysis, use_container_width=True)
+
+    st.divider()
+    st.header("Recent signals (last 24 months)")
+    if signal_table is not None and allocations is not None:
+        last24_idx = signal_table.index[-24:]
+        signal_cols = [
+            "dgs10_change_1m",
+            "bei_change_1m",
+            "bei_change_3m",
+            "tlt_return_1m",
+            "raw_bei_duration_gate",
+            "tradable_bei_duration_gate",
+        ]
+        alloc_cols = [
+            "macro_regime",
+            "base_IEF",
+            "base_TLT",
+            "base_BIL",
+            "final_IEF",
+            "final_TLT",
+            "final_BIL",
+        ]
+        last24 = signal_table.loc[last24_idx, signal_cols].join(
+            allocations.reindex(last24_idx)[alloc_cols]
+        )
+        st.dataframe(last24, use_container_width=True)
+
+
 def page_evaluation(eval_report: dict | None) -> None:
     st.title("Evaluation")
     if eval_report is None:
@@ -565,6 +809,7 @@ def main() -> None:
             "Regime Comparison",
             "Regime Output",
             "Backtest",
+            "Duration Risk Gate",
             "Evaluation",
             "Methodology",
         ],
@@ -591,6 +836,16 @@ def main() -> None:
             _load_csv(BACKTEST_ALLOCATIONS_PRIMARY_PATH),
             _load_csv(BACKTEST_ALLOCATIONS_SECONDARY_PATH),
             _load_csv_plain(BACKTEST_REGIME_ANALYSIS_PATH),
+        )
+    elif page == "Duration Risk Gate":
+        _ensure_bei_duration_gate_data()
+        page_duration_risk_gate(
+            _load_csv(BEI_DURATION_GATE_SIGNALS_PATH),
+            _load_csv(BEI_DURATION_GATE_ALLOCATIONS_PATH),
+            _load_csv_plain(BEI_DURATION_GATE_SUMMARY_PATH),
+            _load_csv(BEI_DURATION_GATE_ANNUAL_RETURNS_PATH),
+            _load_csv(BEI_DURATION_GATE_MONTHLY_RETURNS_PATH),
+            _load_csv_plain(BEI_DURATION_GATE_REGIME_ANALYSIS_PATH),
         )
     elif page == "Evaluation":
         page_evaluation(eval_report)

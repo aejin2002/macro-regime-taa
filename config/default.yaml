@@ -29,6 +29,8 @@ series:
     T10Y3M: { title: "10-Year Treasury Minus 3-Month Treasury", frequency: "d", units: "Percent" }
     T10Y2Y: { title: "10-Year Treasury Minus 2-Year Treasury", frequency: "d", units: "Percent" }
     T5YIE: { title: "5-Year Breakeven Inflation Rate", frequency: "d", units: "Percent" }
+    DGS10: { title: "10-Year Treasury Constant Maturity Rate", frequency: "d", units: "Percent" }
+    T10YIE: { title: "10-Year Breakeven Inflation Rate", frequency: "d", units: "Percent" }
 
 # NOTE: FRED's USSLIND is the Philadelphia Fed "State Leading Indexes" derived
 # national series, discontinued after 2020. It is NOT the Conference Board LEI.
@@ -164,6 +166,16 @@ backtest:
   static_6040:
     growth_basket: 0.60
     intermediate_treasury: 0.40
+
+# v1.1 BEI Duration Risk Gate -- see docs/methodology.md, "BEI Duration
+# Risk Gate (v1.1)". Only tilts the nominal-Treasury duration sleeve
+# (intermediate_treasury + long_treasury) of the Primary v1.0 regime
+# allocation; the macro regime itself and every other asset are
+# untouched. Thresholds/split below are an ex-ante heuristic fixed
+# before running any backtest -- not fit or tuned to past performance.
+bei_duration_gate:
+  ief_weight_when_on: 0.30
+  bil_weight_when_on: 0.70
 
 zscore:
   min_periods_months: 60

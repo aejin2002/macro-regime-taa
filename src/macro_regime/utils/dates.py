@@ -62,3 +62,15 @@ def next_trading_day_of_month(month_end: pd.Timestamp) -> pd.Timestamp:
 
 def months_between(start: pd.Timestamp, end: pd.Timestamp) -> int:
     return (end.year - start.year) * 12 + (end.month - start.month)
+
+
+def drop_incomplete_trailing_month(series: pd.Series, as_of: pd.Timestamp) -> pd.Series:
+    """Drop a still-in-progress trailing month from a month-end-indexed
+    series. `resample("ME")` (via `resample_to_monthly`) labels a
+    still-in-progress month with a *future* month-end date, using
+    whatever partial data exists so far -- e.g. if `as_of` is
+    2026-07-27, a July row stamped "2026-07-31" reflects an incomplete
+    month, not a real completed one, and must be excluded rather than
+    mistaken for a finished month. Only ever trims the single most
+    recent row when it does."""
+    return series.loc[series.index <= as_of]

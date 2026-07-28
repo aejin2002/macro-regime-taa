@@ -40,6 +40,7 @@ from macro_regime.data.fred_series import (
     to_wide,
     validate_all_series,
 )
+from macro_regime.duration_gate.backtest import run_bei_duration_gate_backtest
 from macro_regime.evaluation.lead_lag import growth_forward_target, inflation_forward_target
 from macro_regime.evaluation.report import EvaluationReport, evaluate_model
 from macro_regime.signals.growth import (
@@ -75,6 +76,12 @@ BACKTEST_MONTHLY_RETURNS_PATH = PROCESSED_DIR / "backtest_monthly_returns.csv"
 BACKTEST_ALLOCATIONS_PRIMARY_PATH = PROCESSED_DIR / "backtest_allocations_primary.csv"
 BACKTEST_ALLOCATIONS_SECONDARY_PATH = PROCESSED_DIR / "backtest_allocations_secondary.csv"
 BACKTEST_REGIME_ANALYSIS_PATH = PROCESSED_DIR / "backtest_regime_analysis.csv"
+BEI_DURATION_GATE_SIGNALS_PATH = PROCESSED_DIR / "bei_duration_gate_signals.csv"
+BEI_DURATION_GATE_ALLOCATIONS_PATH = PROCESSED_DIR / "bei_duration_gate_allocations.csv"
+BEI_DURATION_GATE_MONTHLY_RETURNS_PATH = PROCESSED_DIR / "bei_duration_gate_monthly_returns.csv"
+BEI_DURATION_GATE_ANNUAL_RETURNS_PATH = PROCESSED_DIR / "bei_duration_gate_annual_returns.csv"
+BEI_DURATION_GATE_SUMMARY_PATH = PROCESSED_DIR / "bei_duration_gate_summary.csv"
+BEI_DURATION_GATE_REGIME_ANALYSIS_PATH = PROCESSED_DIR / "bei_duration_gate_regime_analysis.csv"
 
 
 @app.command()
@@ -618,6 +625,72 @@ def run_backtest_cmd(
         table.add_row(*[f"{row[c]:.4f}" if isinstance(row[c], float) else str(row[c]) for c in summary_cols])
     console.print(table)
     console.print(f"[green]Saved 6 backtest output files to {PROCESSED_DIR}[/green]")
+
+
+@app.command("run-bei-duration-gate")
+def run_bei_duration_gate_cmd(
+    refresh_cache: bool = typer.Option(False, "--refresh-cache"),
+) -> None:
+    """Run the v1.1 BEI Duration Risk Gate backtest: Primary v1.0's
+    regime-driven allocation, with only its nominal-Treasury duration
+    sleeve (intermediate_treasury + long_treasury) tilted by a DGS10 /
+    T10YIE / TLT-price gate -- see docs/methodology.md, "BEI Duration
+    Risk Gate (v1.1)". The macro regime itself and every other asset are
+    unchanged from v1.0. Requires `build-regime-output` (for
+    regime_output_primary.csv) and `fetch` (for DGS10/T10YIE in
+    fred_wide.csv) to have already run. Never reads or writes any of
+    v1.0's `backtest_*.csv` files."""
+    if not REGIME_OUTPUT_PRIMARY_PATH.exists():
+        console.print("[red]Missing regime output. Run `build-regime-output` first.[/red]")
+        raise typer.Exit(code=1)
+    if not WIDE_PATH.exists():
+        console.print("[red]No fetched data found. Run `fetch` first (needed for DGS10/T10YIE).[/red]")
+        raise typer.Exit(code=1)
+
+    config = load_config()
+    wide = pd.read_csv(WIDE_PATH, index_col=0, parse_dates=True)
+    missing_series = [s for s in ("DGS10", "T10YIE") if s not in wide.columns]
+    if missing_series:
+        console.print(
+            f"[red]{missing_series} not found in fred_wide.csv -- re-run `fetch` "
+            "(config/default.yaml's series.diagnostics must list them).[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    primary_df = pd.read_csv(REGIME_OUTPUT_PRIMARY_PATH, index_col=0, parse_dates=True)
+    primary_regime = primary_df["tradable_regime"]
+
+    console.print("[cyan]Fetching asset + FX prices from Yahoo Finance...[/cyan]")
+    asset_returns, common_start = build_monthly_return_matrix(config, refresh_cache=refresh_cache)
+    console.print(f"[green]Common backtest start date: {common_start.date()}[/green]")
+
+    result = run_bei_duration_gate_backtest(config, primary_regime, wide, asset_returns)
+
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    result.signal_table.to_csv(BEI_DURATION_GATE_SIGNALS_PATH)
+    result.allocations.to_csv(BEI_DURATION_GATE_ALLOCATIONS_PATH)
+    result.monthly_returns.to_csv(BEI_DURATION_GATE_MONTHLY_RETURNS_PATH)
+    result.annual_returns.to_csv(BEI_DURATION_GATE_ANNUAL_RETURNS_PATH)
+    result.summary.to_csv(BEI_DURATION_GATE_SUMMARY_PATH, index=False)
+    result.regime_analysis.to_csv(BEI_DURATION_GATE_REGIME_ANALYSIS_PATH, index=False)
+
+    table = Table(title="BEI Duration Risk Gate v1.1 vs. v1.0 Primary (post-cost)")
+    summary_cols = [
+        "strategy",
+        "start_date",
+        "end_date",
+        "cagr_post_cost",
+        "annualized_vol_post_cost",
+        "sharpe_post_cost",
+        "max_drawdown_post_cost",
+        "final_value_post_cost",
+    ]
+    for col in summary_cols:
+        table.add_column(col)
+    for _, row in result.summary.iterrows():
+        table.add_row(*[f"{row[c]:.4f}" if isinstance(row[c], float) else str(row[c]) for c in summary_cols])
+    console.print(table)
+    console.print(f"[green]Saved 6 BEI Duration Risk Gate output files to {PROCESSED_DIR}[/green]")
 
 
 @app.command("run-all")

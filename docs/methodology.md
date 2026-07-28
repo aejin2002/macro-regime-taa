@@ -418,6 +418,185 @@ real-time performance** -- it is a revised-regime, historical-price
 backtest with a 1-month portfolio-application lag approximation, not a
 tracked, executed strategy.
 
+## BEI Duration Risk Gate (v1.1)
+
+**v1.1 is a single, narrow overlay on top of the frozen v1.0 Primary
+backtest, not a new macro regime model.** It does not forecast interest
+rate *levels*, and it does not change the Primary growth/inflation
+regime classification or any asset outside the nominal-Treasury
+duration sleeve. It only tilts how much of that sleeve's allocation
+(`intermediate_treasury` + `long_treasury`, i.e. IEF + TLT) is held when
+a long-end nominal rate sell-off, confirmed by actually-falling TLT
+prices, is being driven by rising market inflation compensation. It
+exists to reduce long-duration drawdown risk in that specific
+situation, not to maximize return.
+
+`run-bei-duration-gate` compares two strategies under otherwise
+identical conditions to the v1.0 Primary backtest above (same asset
+prices, same Growth Basket, same transaction cost, same monthly
+rebalance-to-target rule, same common start date, same metric
+formulas): **v1.0 Primary** (unmodified) and **v1.1 Primary + BEI
+Duration Risk Gate**. Because it targets only the duration sleeve, this
+comparison is scoped to those two strategies -- it does not re-run
+Secondary, Static 60/40, Equal-weight, or Growth Basket buy-and-hold.
+
+### Data
+
+Two additional FRED series are fetched, alongside the existing pipeline
+series, via the same `fetch`/`FredClient` cache (`config/default.yaml`,
+`series.diagnostics`):
+
+- **DGS10** -- 10-Year Treasury Constant Maturity Rate (the long-end
+  nominal rate the gate confirms is actually rising).
+- **T10YIE** -- 10-Year Breakeven Inflation Rate. **This is the market's
+  inflation *compensation* embedded in the spread between nominal and
+  TIPS Treasury yields -- it is not a pure survey- or model-based
+  expected-inflation measure.** It is also influenced by an inflation
+  risk premium and by TIPS-market liquidity conditions, which can move
+  independently of actual inflation expectations. This module and the
+  product UI always refer to it as "market inflation compensation," not
+  "expected inflation."
+
+Both are daily series, averaged to month-end
+(`duration_gate/signal.py::monthly_rate_level`, reusing
+`utils/dates.py::resample_to_monthly(how="mean")` and the same
+`drop_incomplete_trailing_month` still-in-progress-month exclusion used
+throughout this project -- no forward fill, no backfilling before a
+series' own start). TLT's monthly return is the same adjusted
+(split+dividend) monthly return already computed for the v1.0 backtest
+(`backtest/assets.py::build_monthly_return_matrix`'s `long_treasury`
+column) -- not recomputed separately.
+
+DGS10 and T10YIE are both available on FRED well before the v1.0
+backtest's own binding constraint (the 2009-05 `069500.KS` gap
+described above), so adding them **does not move the common backtest
+start date** -- verified live: the rate-signal series' own common start
+is 2003-01, while the asset-price-driven common start remains 2009-05.
+
+### The gate: `raw_bei_duration_gate`
+
+For a completed month `t` (never a still-in-progress month):
+
+```
+dgs10_change_1m = DGS10[t] - DGS10[t-1]
+bei_change_1m   = T10YIE[t] - T10YIE[t-1]
+bei_change_3m   = T10YIE[t] - T10YIE[t-3]
+tlt_return_1m   = TLT's adjusted monthly return for month t
+```
+
+`raw_bei_duration_gate[t]` = **ON** iff all four hold:
+
+1. `dgs10_change_1m > 0` -- the long-end nominal rate actually rose.
+2. `tlt_return_1m < 0` -- TLT's own price actually fell (a real,
+   realized loss, not just a rate move).
+3. `bei_change_1m > 0` -- market inflation compensation rising, 1-month.
+4. `bei_change_3m > 0` -- market inflation compensation rising,
+   3-month (the move is not a single-month blip).
+
+**OFF** if every one of the four values needed is present but the AND
+fails. **UNKNOWN** if any of the four is missing (e.g. the warm-up
+period before a 3-month lookback is available). No real-yield
+condition, no DGS2-based signal, and no combination with any other
+signal is used -- this gate is deliberately narrower than the
+DFII10/real-yield and DGS2/DGS10 `rate_score`-based variants explored
+during development (see "Prior experiment models," below).
+
+**Only the ex-ante thresholds above are used.** The 1-month/3-month
+windows, the strict `> 0` / `< 0` comparisons, and the 30%/70% IEF/BIL
+split below were fixed before any backtest was run and are not
+optimized, tuned, or adjusted to past performance -- including after
+seeing that performance.
+
+### Application timing
+
+```
+tradable_bei_duration_gate[t] = raw_bei_duration_gate[t-1]
+```
+
+The gate confirmed as of month `t-1`'s close is what month `t`'s
+portfolio may use; month `t`'s own raw gate (only fully known at `t`'s
+own close) never drives month `t`'s allocation. The very first month in
+any sample has no prior raw gate and is UNKNOWN, never defaulted to ON
+or OFF.
+
+### Allocation rule
+
+For each month, `duration_pool = base_IEF + base_TLT` (from Primary
+v1.0's regime allocation table, unmodified). `base_BIL` is tracked
+separately and always preserved.
+
+- **Gate ON**: `final_TLT = 0`, `final_IEF = duration_pool * 0.30`,
+  `additional_BIL = duration_pool * 0.70`, `final_BIL = base_BIL +
+  additional_BIL`.
+- **Gate OFF or UNKNOWN**: `final_IEF = base_IEF`, `final_TLT =
+  base_TLT`, `final_BIL = base_BIL` -- Primary v1.0's allocation
+  exactly, unchanged.
+- **`duration_pool == 0`** (e.g. REFLATION, STAGFLATION, UNKNOWN
+  regimes, which hold no IEF/TLT to begin with): the entire month's
+  allocation is left unchanged regardless of gate state -- there is
+  nothing to tilt.
+
+There is **no rule that ever expands TLT** -- this is a one-directional
+duration-reduction brake, not a directional call on falling rates.
+Growth Basket, the SPY/KODEX200 60/40 split, HYG, LQD, TIP, DBC, and
+GLD are never touched. `duration_pool` and `base_BIL` are always exactly
+conserved; total portfolio weight always sums to 1 with no negative
+weights (`tests/test_duration_gate.py`).
+
+### Output files
+
+`run-bei-duration-gate` writes six files to `data/processed/`, none of
+which overwrite or are read by the v1.0 `backtest_*.csv` files:
+`bei_duration_gate_signals.csv` (the raw signal table), `_allocations.csv`
+(base vs. final IEF/TLT/BIL per month plus every other asset's final
+weight), `_monthly_returns.csv`, `_annual_returns.csv`, `_summary.csv`
+(CAGR/Vol/Sharpe/Sortino/MaxDD/Calmar/turnover, pre- and post-cost, for
+both strategies), and `_regime_analysis.csv` (per-regime average
+returns, plus a period breakdown -- 2013 Taper Tantrum, 2018, 2020,
+2021, 2022, 2023-2024 -- of cumulative return, max drawdown, and
+gate-ON-month count for each strategy).
+
+### Known limitations
+
+- **T10YIE is market inflation compensation, not expected inflation** --
+  repeated here because it is easy to conflate the two; risk premia and
+  TIPS-market liquidity can move this series independent of actual
+  inflation expectations.
+- **This is a revised-FRED-data backtest**, like v1.0 -- not a
+  real-time/ALFRED-vintage track record.
+- **2008 (GFC) is not covered**, for the same reason as v1.0: the
+  `069500.KS` price gap sets the common backtest start at 2009-05.
+- **The 1-month/3-month windows and 30%/70% split are ex-ante
+  heuristics**, not values taken from a published paper and not
+  re-optimized after seeing backtest results.
+- **The most recent 24 months of the backtest sample showed a small
+  performance drag relative to v1.0 Primary** in development testing --
+  this is disclosed, not hidden, and is consistent with the gate being
+  a risk-reduction brake rather than a return-maximizing signal: it
+  will not help in every period, including recent ones.
+- **No guarantee of forward repeatability.** Historical improvement,
+  where present, does not imply the gate will behave the same way in a
+  future rate cycle.
+
+### Prior experiment models (not in this product)
+
+During development, three additional decomposition/hybrid gate variants
+and a FALLING-state TLT-*expansion* rule were backtested in an isolated
+temporary environment to understand which components of a broader
+"rate overlay" idea actually added value beyond this BEI-only gate:
+**Rising-only** (a DGS2/DGS10-based `rate_score` gate, no T10YIE/DFII10
+involved), **Real-yield-only** (DFII10-based, the mirror-image of this
+BEI gate), **Decomposition OR** (BEI OR real-yield), **Hybrid**
+(Rising-only OR Decomposition OR), and the FALLING-state rule that
+*expands* TLT when rates are falling. None of these are implemented in
+this codebase -- they were experiment-only, run in a disposable
+temporary directory, and are not reachable from any CLI command,
+Streamlit page, or config in this repository. This BEI-only gate was
+selected because it was the only variant that continued to outperform
+v1.0 Primary after excluding 2022 (the single year that otherwise drove
+most of the other variants' apparent edge) and after excluding
+2021-2023 entirely.
+
 ## Conference Board LEI vs. FRED USSLIND
 
 `USSLIND` on FRED is the **Philadelphia Fed's State Leading Indexes**

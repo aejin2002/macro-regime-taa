@@ -250,6 +250,36 @@ Writes `data/processed/backtest_summary.csv`,
 slower, independently-cached network source) -- run it after
 `build-regime-output`.
 
+## BEI Duration Risk Gate (v1.1)
+
+A single, narrow overlay on top of Primary v1.0 -- **not** a new macro
+regime model, and it does not forecast rate levels or change any asset
+outside the nominal-Treasury duration sleeve (IEF + TLT). It tilts that
+sleeve toward T-bills only when DGS10 confirms a long-end rate rise, TLT
+actually loses money that month, and T10YIE (10-Year Breakeven
+Inflation -- **market inflation compensation, not pure expected
+inflation**) is rising on both a 1-month and 3-month window. Gate OFF or
+UNKNOWN leaves Primary v1.0's allocation exactly unchanged. See
+`docs/methodology.md`, "BEI Duration Risk Gate (v1.1)", for the full
+rule, the timing (`tradable_gate[t] = raw_gate[t-1]`), and results
+including 2022-excluded and 2021-2023-excluded robustness checks.
+
+```bash
+python -m macro_regime.cli run-bei-duration-gate
+```
+
+Requires `fetch` (for DGS10/T10YIE) and `build-regime-output` to have
+already run. Writes `data/processed/bei_duration_gate_signals.csv`,
+`_allocations.csv`, `_monthly_returns.csv`, `_annual_returns.csv`,
+`_summary.csv`, `_regime_analysis.csv` -- never overwrites or reads any
+`backtest_*.csv` file.
+
+Three related overlay variants (Rising-only, Real-yield-only,
+Decomposition OR, Hybrid, and a FALLING-state TLT-expansion rule) were
+backtested during development and are **not** part of this codebase --
+see "Prior experiment models" in `docs/methodology.md` for why this
+BEI-only gate was the one selected.
+
 ## Running the pipeline
 
 ```bash
@@ -266,6 +296,7 @@ python -m macro_regime.cli build-signals --growth-model all --inflation-model al
 python -m macro_regime.cli evaluate
 python -m macro_regime.cli build-regime-output
 python -m macro_regime.cli run-backtest
+python -m macro_regime.cli run-bei-duration-gate
 python -m macro_regime.cli run-all   # fetch -> build-signals -> evaluate -> build-regime-output
 ```
 
@@ -280,9 +311,12 @@ make app
 ```
 
 Pages: Overview, Data Explorer, Growth Models, Inflation Models, Regime
-Comparison, Regime Output, Backtest, Evaluation, Methodology. Run `make
-run-all` and `run-backtest` (or the CLI commands above) at least once
-before launching the app so `data/processed/*` exists.
+Comparison, Regime Output, Backtest, Duration Risk Gate, Evaluation,
+Methodology. Run `make run-all`, `run-backtest`, and
+`run-bei-duration-gate` (or the CLI commands above) at least once before
+launching the app so `data/processed/*` exists -- or just launch the
+app: each page lazily bootstraps its own required data on first visit
+(see `app/streamlit_app.py`'s module docstring).
 
 ## Tests and linting
 
