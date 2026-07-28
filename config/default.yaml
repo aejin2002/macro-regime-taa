@@ -31,6 +31,7 @@ series:
     T5YIE: { title: "5-Year Breakeven Inflation Rate", frequency: "d", units: "Percent" }
     DGS10: { title: "10-Year Treasury Constant Maturity Rate", frequency: "d", units: "Percent" }
     T10YIE: { title: "10-Year Breakeven Inflation Rate", frequency: "d", units: "Percent" }
+    VIXCLS: { title: "CBOE Volatility Index (VIX)", frequency: "d", units: "Index" }
 
 # NOTE: FRED's USSLIND is the Philadelphia Fed "State Leading Indexes" derived
 # national series, discontinued after 2020. It is NOT the Conference Board LEI.
@@ -176,6 +177,24 @@ backtest:
 bei_duration_gate:
   ief_weight_when_on: 0.30
   bil_weight_when_on: 0.70
+
+# v1.2 Fast Crisis Overlay -- see docs/methodology.md, "Fast Crisis
+# Overlay (v1.2)". A daily-frequency, 2-of-3-signal tail-risk brake on
+# top of Primary v1.0 + BEI Duration Risk Gate (v1.1). Fires on VIX,
+# SPY, and HYG shocks; never changes the macro regime, the BEI gate, or
+# LQD/IEF/TLT/GLD/TIP. All thresholds below are ex-ante heuristics fixed
+# before any backtest was run and were not re-tuned after seeing results
+# (see Phase A verification in the delivery record for this feature).
+fast_crisis:
+  vix_threshold: 30.0
+  vix_ma_window_days: 20
+  vix_ma_ratio_threshold: 0.50
+  equity_shock_window_days: 5
+  equity_shock_threshold: -0.07
+  credit_shock_window_days: 5
+  credit_shock_threshold: -0.03
+  min_hold_days: 10
+  min_off_days_to_exit: 5
 
 zscore:
   min_periods_months: 60

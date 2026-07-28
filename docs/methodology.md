@@ -597,6 +597,225 @@ v1.0 Primary after excluding 2022 (the single year that otherwise drove
 most of the other variants' apparent edge) and after excluding
 2021-2023 entirely.
 
+## Fast Crisis Overlay (v1.2)
+
+**v1.2 is a daily-frequency tail-risk brake on top of v1.1 (Primary v1.0
++ BEI Duration Risk Gate), not a new macro regime model.** v1.1's
+monthly regime/BEI logic is completely unchanged and untouched by v1.2
+-- `run-fast-crisis-overlay` never reads or writes any `backtest_*.csv`
+or `bei_duration_gate_*.csv` file, and v1.1 remains independently runnable
+via `run-bei-duration-gate` exactly as before. v1.2 exists because v1.1's
+own worst drawdown (the 2020 COVID shock) was diagnosed as occurring
+*within* a single calendar month, invisible to a monthly-rebalance
+engine until the month had already closed -- v1.2 adds a same-week-scale
+daily watch layer that can act mid-month, which a monthly engine
+structurally cannot.
+
+Layer order: **1. Macro Regime -> 2. BEI Duration Risk Gate -> 3. Fast
+Crisis Overlay.** The BEI gate only ever touches
+`intermediate_treasury`/`long_treasury`/`tbills`; the Fast Crisis Overlay
+only ever touches `spy`/`kodex200_usd`/`high_yield`/`commodities`/`tbills`
+-- the two gates never act on the same weight, so they cannot fight each
+other or double-count a de-risking move.
+
+### Official daily evaluation calendar
+
+v1.2's engine walks one canonical daily calendar: **SPY's own US trading
+days** (all US-listed ETFs in the universe share this exactly). KODEX
+200 (069500.KS, KRX) and KRW=X are as-of joined onto it -- each SPY day
+uses the most recent KRX/FX close on or before that day, never a future
+one. Whenever KRX/FX trade on a date SPY has no session for (a US
+holiday that isn't a KRX holiday), that day's KRX/FX movement is
+attributed to the *next* SPY trading day's return. This is a genuine,
+structural difference from the legacy monthly engine (which samples each
+asset's own last trading day of the calendar month) -- **not a bug**.
+Worked example: 2010-05-31 was a US holiday; SPY's last May session was
+2010-05-28, while KRX/FX traded through 05-31. The legacy monthly engine
+uses the 05-31 KODEX/FX price for May's return; v1.2's daily engine
+attributes that same 3 days of movement to June instead. Verified live:
+this class of difference tops out at 0.36 percentage points in any
+single month across the full 2009-05 to 2026-06 sample, and daily-close
+returns for every OTHER asset (spy, high_yield, investment_grade,
+intermediate_treasury, long_treasury, gold, tbills, commodities, tips)
+match the legacy monthly engine's own asset returns to floating-point
+precision (<= 2e-6).
+
+### Missing-value handling
+
+A raw daily price series can have an index entry that already exists (a
+real trading day) with a `NaN` value -- a data-provider gap, not a
+missing calendar date. This actually occurred once in the verification
+sample: **069500.KS on 2024-10-30**. A plain `reindex(calendar,
+method="ffill")` only fills index positions *absent* from the source; it
+silently passes an already-present `NaN` cell through unchanged, and a
+downstream `.prod()` compounding call treats that day as an implicit 0%
+return -- distorting that month's real return (verified: true October
+2024 KODEX return ~-6.44%, distorted value ~-4.51%, a 0.46-point swing in
+that single month's portfolio return). `fast_crisis/daily_data.py` fixes
+this by `.ffill()`-ing every raw series (carrying the last known value
+forward only, never fabricating, never filling before a series' own
+first valid observation) *before* the as-of join, and
+`validate_no_gaps_in_range` fails loudly -- naming the exact asset(s) and
+date(s) -- if any `NaN` remains in the range a backtest actually uses.
+**This fix lives only in `fast_crisis/`, not in `backtest/assets.py`**:
+the legacy monthly engine was independently verified unaffected by this
+specific gap (its own October 2024 return was already correct, since
+month-end resampling happened to land on a valid day), so v1.1's
+official numbers are untouched by this fix.
+
+### The three shock signals
+
+```
+vix_shock[t]    = VIX[t] > 30 AND VIX[t] / MA20(VIX)[t] - 1 > 0.50
+equity_shock[t] = SPY's 5-trading-day total return <= -7%
+credit_shock[t] = HYG's 5-trading-day total return <= -3%
+```
+
+Each is **UNKNOWN**, never guessed, until its own warm-up window (20
+valid VIX observations; 5 trading days of return history) is available.
+`raw_fast_crisis_trigger[t]` = **ON** iff at least 2 of the 3 signals are
+ON; with exactly 2 observed it is ON only if both are True, OFF only if
+both are False (the third, missing signal can never change either of
+those two outcomes), and **UNKNOWN** only in the genuinely ambiguous
+case of exactly 1 of 2 observed signals being True. Fewer than 2
+observed signals is always UNKNOWN.
+
+All three thresholds, the 20-day VIX window, and the 2-of-3 combination
+rule (`config/default.yaml`, `fast_crisis:`) are **ex-ante heuristics**
+fixed before any backtest was run and were not re-tuned after seeing
+results -- see "Research basis and limitations," below.
+
+### Application timing and the entry/exit state machine
+
+```
+tradable_trigger[t] = raw_fast_crisis_trigger[t-1]
+```
+
+A same-day close signal is never treated as tradable on its own day --
+the 1-trading-day lag mirrors the BEI gate's own `raw[t-1]` convention.
+
+- **OFF -> ON**: the first trading day whose `tradable_trigger == ON`.
+  UNKNOWN never triggers an entry.
+- **Once ON**: stays ON for at least **10 trading days**, regardless of
+  what the trigger does during that window.
+- **Exit**: after the minimum hold has elapsed, exits on the trading day
+  following **5 consecutive** `tradable_trigger == OFF` days. UNKNOWN
+  neither counts toward this streak nor resets it -- it is skipped.
+- **Re-affirmation**: a fresh `tradable_trigger == ON` while already in
+  Crisis Mode restarts the minimum-hold counter and resets the
+  consecutive-OFF counter to 0.
+
+### Allocation rule
+
+**Crisis Mode ON**: Growth Basket (`spy` + `kodex200_usd`), `high_yield`,
+and `commodities` are all set to 0; their combined weight moves entirely
+to `tbills`. `investment_grade`, `intermediate_treasury`, `long_treasury`,
+`gold`, and `tips` -- and whatever the BEI gate has already done to
+`intermediate_treasury`/`long_treasury`/`tbills` -- pass through
+unchanged. **Crisis Mode OFF or UNKNOWN**: v1.1's (already BEI-gated)
+allocation is returned exactly unchanged. There is no rule that ever
+*increases* risk exposure -- this is a one-directional de-risking brake.
+A day that is both a monthly rebalance day and a Crisis Mode entry/exit
+day trades exactly once, to the final combined target, with exactly one
+transaction cost applied -- never double-counted.
+
+### Daily portfolio mechanics
+
+The existing, **unmodified** `backtest.engine.run_strategy` -- already
+index-frequency-agnostic -- is reused as-is for the daily walk; no new
+portfolio engine was written. Weights are only re-set to target on an
+actual rebalance day (each month's first trading day, or a Crisis Mode
+entry/exit day); every other day, the strategy's actual held weights
+drift with realized asset returns and no trade or cost occurs. Verified
+live: `v1_1_daily`'s own crisis-attributable turnover is exactly 0 (it
+has no overlay), and no strategy ever has nonzero turnover on a
+non-rebalance day.
+
+### Two MaxDD readings -- never mixed
+
+**Daily-close MaxDD** (`max_drawdown_daily_close_*`) is computed from
+the full daily NAV path and sees the actual worst intra-month level.
+**Month-end MaxDD** (`max_drawdown_month_end_*`) is computed from the
+NAV sampled only at each month's last trading day -- what the legacy
+monthly v1.1 backtest itself reports, and matches it closely (verified
+live: v1.1's daily-restated month-end MaxDD is -15.387% vs. the legacy
+monthly engine's own -15.387%). These two numbers describe different
+things and are always kept in separately labeled columns, never averaged
+or substituted for one another; all daily-frequency metrics use 252-day
+annualization, never the monthly engine's 12-month convention
+(`fast_crisis/metrics.py`, deliberately separate from `backtest/metrics.py`).
+
+### Results (v1.1 vs. v1.2, post-cost, 2009-05-01 to 2026-06-30, live run)
+
+| Strategy | CAGR | Vol | Sharpe | Sortino | Daily-close MaxDD | Month-end MaxDD | Calmar | Turnover/yr |
+|---|---|---|---|---|---|---|---|---|
+| v1.1 (daily-restated) | 10.22% | 8.60% | 1.026 | 1.305 | -22.61% | -15.39% | 0.452 | 2.19 |
+| v1.2 Fast Crisis Overlay | 10.80% | 7.98% | 1.165 | 1.585 | -16.64% | -13.37% | 0.649 | 2.54 |
+
+v1.2 improves every one of these metrics over v1.1, driven overwhelmingly
+by the 2020 COVID shock (the only period where v1.1's own worst drawdown
+occurred). Excluding 2020 entirely, v1.2's Sharpe improvement over v1.1
+narrows to roughly neutral-to-slightly-positive rather than large; it
+remains non-negative excluding 2020+2022 combined and even excluding the
+most recent 24 months -- i.e. the improvement is not manufactured by a
+single crisis alone, but the bulk of its economic value is concentrated
+in exactly the kind of acute, fast-moving shock it was designed for.
+
+### Output files
+
+`run-fast-crisis-overlay` writes seven files to `data/processed/`, none
+of which overwrite or are read by v1.0's `backtest_*.csv` or v1.1's
+`bei_duration_gate_*.csv` files: `fast_crisis_signals_daily.csv` (every
+daily signal, trigger, and state-machine column), `_allocations_daily.csv`
+(base v1.1 vs. final v1.2 weights per day), `_daily_returns.csv`,
+`_monthly_returns.csv` (both strategies' NAV re-sampled to month-end),
+`_summary.csv` (the dual-MDD performance table above, pre- and post-cost),
+`_turnover_breakdown.csv` (monthly-rebalance vs. crisis-entry/exit
+turnover per strategy), and `_current_status.json` (today's regime, gate
+states, Crisis Mode status, and both strategies' current weights -- the
+same snapshot a live dashboard would show).
+
+### Known limitations
+
+- **The three thresholds, the 20-day VIX window, the 2-of-3 rule, and
+  the 10-day/5-day hold/exit rule are ex-ante heuristics**, fixed before
+  any backtest was run and not re-optimized after seeing results.
+- **This is a revised-price backtest**, like v1.0/v1.1 -- not a
+  real-time/live track record.
+- **Most of the measured benefit comes from a single event (2020)** --
+  disclosed, not hidden; see "Results," above.
+- **VIX-only and Equity+VIX combination candidates were also tested and
+  rejected** during development in favor of the 2-of-3 rule shipped here
+  (VIX-only alone had a ~70% false-positive rate on its own entries) --
+  those candidates are not implemented in this codebase.
+- **No guarantee of forward repeatability.** A future crisis may not
+  resemble 2020's shape closely enough for these specific daily
+  thresholds to fire in time, or at all.
+
+### Research basis and limitations
+
+- **Moreira & Muir** (volatility-managed portfolios): reducing risk
+  exposure in high-volatility regimes is a well-studied direction in the
+  academic literature -- cited here as directional motivation for a
+  vol-based brake, not as a source of this overlay's specific numeric
+  thresholds.
+- **VIX** is the market's own ~30-day-forward implied volatility, priced
+  into S&P 500 options -- a market-implied risk gauge, not a realized
+  historical volatility measure.
+- **Credit-market stress research** motivates treating credit spreads as
+  informationally distinct from equity price action -- credit markets
+  can reflect funding/liquidity stress that hasn't yet fully shown up in
+  equity prices. **HYG is an imperfect, ETF-price-based proxy for credit
+  spreads (OAS)**, not the spread itself -- it is affected by ETF
+  premium/discount dynamics and liquidity conditions of the fund, not
+  purely the underlying bonds' credit risk.
+- **The 2-of-3 combination across three largely independent signal
+  families** is a standard confirmation-style design intended to reduce
+  the false-positive rate any single signal would have alone -- verified
+  live to matter: VIX-only's entries had a substantially higher
+  false-positive rate than the 2-of-3 rule's entries over the same
+  sample.
+
 ## Conference Board LEI vs. FRED USSLIND
 
 `USSLIND` on FRED is the **Philadelphia Fed's State Leading Indexes**

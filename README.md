@@ -280,6 +280,42 @@ backtested during development and are **not** part of this codebase --
 see "Prior experiment models" in `docs/methodology.md` for why this
 BEI-only gate was the one selected.
 
+## Fast Crisis Overlay (v1.2)
+
+A **daily-frequency** tail-risk brake layered on top of v1.1 (Primary
+v1.0 + BEI Duration Risk Gate), which never touches v1.1 itself --
+`run-bei-duration-gate` and its output files remain independently
+correct and unmodified. Three shock signals (VIX level+spike, SPY
+5-day return, HYG 5-day return) combine 2-of-3 into a raw trigger; a
+minimum-10-day-hold / 5-consecutive-OFF-day-exit state machine turns
+that into Crisis Mode, which -- only when ON -- moves Growth Basket,
+HYG, and DBC entirely to T-bills. Applied `t+1` after the raw signal,
+never same-day. See `docs/methodology.md`, "Fast Crisis Overlay
+(v1.2)", for the full signal definitions, the SPY-calendar daily
+evaluation convention (and how it differs from the legacy monthly
+engine's own month-end sampling), the missing-value-handling fix, and
+the two distinct MaxDD readings (daily-close vs. month-end) this
+overlay always reports separately.
+
+```bash
+python -m macro_regime.cli run-fast-crisis-overlay
+```
+
+Requires `fetch` (for DGS10/T10YIE/VIXCLS) and `build-regime-output` to
+have already run. Writes `data/processed/fast_crisis_signals_daily.csv`,
+`_allocations_daily.csv`, `_daily_returns.csv`, `_monthly_returns.csv`,
+`_summary.csv`, `_turnover_breakdown.csv`, `_current_status.json` --
+never overwrites or reads any `backtest_*.csv` or `bei_duration_gate_*.csv`
+file.
+
+**Results (post-cost, 2009-05-01 to 2026-06-30):** v1.1 CAGR 10.22% /
+Sharpe 1.026 / daily-close MaxDD -22.61% / month-end MaxDD -15.39% vs.
+v1.2 CAGR 10.80% / Sharpe 1.165 / daily-close MaxDD -16.64% / month-end
+MaxDD -13.37%. Most of this improvement is concentrated in the 2020
+COVID shock; it stays non-negative excluding 2020, 2020+2022, and the
+most recent 24 months, so the benefit is not manufactured by a single
+event alone.
+
 ## Running the pipeline
 
 ```bash
@@ -297,6 +333,7 @@ python -m macro_regime.cli evaluate
 python -m macro_regime.cli build-regime-output
 python -m macro_regime.cli run-backtest
 python -m macro_regime.cli run-bei-duration-gate
+python -m macro_regime.cli run-fast-crisis-overlay
 python -m macro_regime.cli run-all   # fetch -> build-signals -> evaluate -> build-regime-output
 ```
 
