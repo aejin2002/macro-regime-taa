@@ -809,126 +809,46 @@ def _classify_event(row: pd.Series, prev_row: pd.Series | None) -> str:
     return "Fast Crisis extension" if row["fast_crisis_tradable"] == "ON" else "Scheduled rebalance"
 
 
-@st.cache_data(show_spinner=False)
-def _growth_evidence(_mtime_key: float, series_id: str, window_months: int) -> dict | None:
-    """Real numeric evidence for the Growth signal, pulled directly from
-    `fred_wide.csv` -- the exact same input `signals.growth.classify_growth_model_a`
-    reads (`cli.iloc[-1] - cli.iloc[-1-window]`, a positional monthly shift,
-    matching `utils.stats.diff_n` exactly). Never a placeholder/internal
-    model name alone."""
-    path = ROOT / "data" / "processed" / "fred_wide.csv"
-    if not path.exists() or series_id not in pd.read_csv(path, index_col=0, nrows=0).columns:
-        return None
-    wide = pd.read_csv(path, index_col=0, parse_dates=True)
-    series = wide[series_id].dropna()
-    if len(series) <= window_months:
-        return None
-    latest_date, latest_value = series.index[-1], float(series.iloc[-1])
-    prev_date, prev_value = series.index[-1 - window_months], float(series.iloc[-1 - window_months])
-    change = latest_value - prev_value
-    return {
-        "series_id": series_id, "source": "FRED", "latest_date": latest_date, "latest_value": latest_value,
-        "prev_date": prev_date, "prev_value": prev_value, "change": change,
-        "rule": f"Up if (value[t] - value[t-{window_months}m]) > 0, else Down",
-        "raw_signal": "Up" if change > 0 else "Down",
-    }
-
-
-@st.cache_data(show_spinner=False)
-def _inflation_evidence(
-    _mtime_key: float, series_id: str, short_months: int, long_months: int
-) -> dict | None:
-    """Real numeric evidence for the Inflation signal, matching
-    `signals.inflation.core_inflation_momentum` exactly: 3-month change
-    annualized minus the trailing 12-month change."""
-    path = ROOT / "data" / "processed" / "fred_wide.csv"
-    if not path.exists() or series_id not in pd.read_csv(path, index_col=0, nrows=0).columns:
-        return None
-    wide = pd.read_csv(path, index_col=0, parse_dates=True)
-    series = wide[series_id].dropna()
-    if len(series) <= long_months:
-        return None
-    latest_date, latest_value = series.index[-1], float(series.iloc[-1])
-    short_prev = float(series.iloc[-1 - short_months])
-    long_prev = float(series.iloc[-1 - long_months])
-    short_growth = latest_value / short_prev - 1.0
-    periods_per_year = 12 / short_months
-    short_annualized = (1 + short_growth) ** periods_per_year - 1.0
-    long_growth = latest_value / long_prev - 1.0
-    signal_raw = short_annualized - long_growth
-    return {
-        "series_id": series_id, "source": "FRED", "latest_date": latest_date, "latest_value": latest_value,
-        "short_annualized": short_annualized, "long_change": long_growth, "change": signal_raw,
-        "rule": f"Up if ({short_months}m-annualized momentum) > ({long_months}m change), else Down",
-        "raw_signal": "Up" if signal_raw > 0 else "Down",
-    }
-
-
 with tab_signals:
     st.markdown("#### Growth Signal Evidence")
     config = _cached_config()
     growth_row = v13.iloc[-1]
     g_conf = config["growth_models"]["model_a_cli"]
-    _wide_path = ROOT / "data" / "processed" / "fred_wide.csv"
-    _wide_mtime = _wide_path.stat().st_mtime if _wide_path.exists() else 0.0
-    g_ev = _growth_evidence(_wide_mtime, g_conf["us_series"], g_conf["primary_window_months"])
+    lag_months = config["regime_output"]["tradable_lag_months"]
+    effective_date = freshness["current_macro_allocation_effective_from"]
+    observed_date = v13.index.max()
     with st.container(border=True):
         st.markdown(f"**Why Growth is {growth_row['growth_state']}** (currently effective)")
-        if g_ev is None:
-            st.warning(f"Evidence series `{g_conf['us_series']}` not found in `fred_wide.csv`.")
-        else:
-            st.markdown(
-                f"- Series: `{g_ev['series_id']}` (OECD Composite Leading Indicator, US) -- "
-                f"Source: {g_ev['source']}\n"
-                f"- Observation month: {fmt_date(g_ev['latest_date'])} -- "
-                f"Latest value: {fmt_num(g_ev['latest_value'], 4)}\n"
-                f"- Comparison month ({g_conf['primary_window_months']}m prior): "
-                f"{fmt_date(g_ev['prev_date'])} -- value: {fmt_num(g_ev['prev_value'], 4)}\n"
-                f"- Calculated change: {fmt_num(g_ev['change'], 4)} "
-                f"({'positive' if g_ev['change'] > 0 else 'non-positive'})\n"
-                f"- Rule: {g_ev['rule']}\n"
-                f"- Raw signal (this observation month, unlagged): **{g_ev['raw_signal']}**\n"
-                f"- Effective month (used for the CURRENT regime, "
-                f"lagged {config['regime_output']['tradable_lag_months']} month(s)): "
-                f"**{growth_row['growth_state']}** (score {fmt_num(growth_row['growth_score'], 4)})"
-            )
-            if g_ev["raw_signal"] != growth_row["growth_state_observed"]:
-                st.caption("Note: raw_signal above is recomputed live from fred_wide.csv; "
-                           "growth_state_observed is the pipeline's own stored value for the same month.")
+        st.markdown(
+            f"- Model: `{g_conf['us_series']}` (OECD Composite Leading Indicator, US)\n"
+            f"- Effective signal (used for the CURRENT regime, lagged {lag_months} month(s)): "
+            f"**{growth_row['growth_state']}** as of {fmt_date(effective_date)} "
+            f"(score {fmt_num(growth_row['growth_score'], 4)})\n"
+            f"- Observed signal (most recent reading, not yet effective): "
+            f"**{growth_row['growth_state_observed']}** as of {fmt_date(observed_date)}"
+        )
         st.caption(
-            f"Most recently OBSERVED (not yet effective) reading: "
-            f"**{growth_row['growth_state_observed']}** -- this becomes effective "
-            f"next month under the {config['regime_output']['tradable_lag_months']}-month lag."
+            "Observed becomes effective next month under the "
+            f"{lag_months}-month lag. Values above are read directly from the production "
+            "artifact -- this dashboard never recomputes a signal."
         )
 
     st.markdown("#### Inflation Signal Evidence")
     i_conf = config["inflation_models"]["model_a_realized_core"]
-    i_ev = _inflation_evidence(
-        _wide_mtime, i_conf["core_series"], i_conf["short_window_months"], i_conf["long_window_months"]
-    )
     with st.container(border=True):
         st.markdown(f"**Why Inflation is {growth_row['inflation_state']}** (currently effective)")
-        if i_ev is None:
-            st.warning(f"Evidence series `{i_conf['core_series']}` not found in `fred_wide.csv`.")
-        else:
-            st.markdown(
-                f"- Series: `{i_ev['series_id']}` (Core CPI, US) -- Source: {i_ev['source']}\n"
-                f"- Observation month: {fmt_date(i_ev['latest_date'])} -- Latest index value: "
-                f"{fmt_num(i_ev['latest_value'], 2)}\n"
-                f"- {i_conf['short_window_months']}-month change, annualized: "
-                f"{fmt_pct(i_ev['short_annualized'])}\n"
-                f"- {i_conf['long_window_months']}-month change: {fmt_pct(i_ev['long_change'])}\n"
-                f"- Calculated momentum (short annualized - long): {fmt_pct(i_ev['change'])}\n"
-                f"- Rule: {i_ev['rule']}\n"
-                f"- Raw signal (this observation month, unlagged): **{i_ev['raw_signal']}**\n"
-                f"- Effective month (used for the CURRENT regime, "
-                f"lagged {config['regime_output']['tradable_lag_months']} month(s)): "
-                f"**{growth_row['inflation_state']}** (score {fmt_pct(growth_row['inflation_score'])})"
-            )
+        st.markdown(
+            f"- Model: `{i_conf['core_series']}` (Core CPI, US)\n"
+            f"- Effective signal (used for the CURRENT regime, lagged {lag_months} month(s)): "
+            f"**{growth_row['inflation_state']}** as of {fmt_date(effective_date)} "
+            f"(score {fmt_pct(growth_row['inflation_score'])})\n"
+            f"- Observed signal (most recent reading, not yet effective): "
+            f"**{growth_row['inflation_state_observed']}** as of {fmt_date(observed_date)}"
+        )
         st.caption(
-            f"Most recently OBSERVED (not yet effective) reading: "
-            f"**{growth_row['inflation_state_observed']}** -- this becomes effective "
-            f"next month under the {config['regime_output']['tradable_lag_months']}-month lag."
+            "Observed becomes effective next month under the "
+            f"{lag_months}-month lag. Values above are read directly from the production "
+            "artifact -- this dashboard never recomputes a signal."
         )
 
     st.markdown("#### BEI Duration Gate")
