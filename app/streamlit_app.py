@@ -38,6 +38,7 @@ from ui.data_loader import (  # noqa: E402
     load_pipeline_status,
     load_v1_2_regression_daily,
     load_v1_3_daily,
+    v1_3_artifact_source_info,
 )
 from ui.formatters import fmt_date, fmt_int, fmt_num, fmt_pct  # noqa: E402
 from ui.theme import COLORS, inject_css  # noqa: E402
@@ -206,6 +207,13 @@ with st.sidebar:
     )
     if pipeline_status:
         st.caption(f"Pipeline last completed: {pipeline_status.get('completed_at', 'n/a')[:19]}")
+
+    artifact_info = v1_3_artifact_source_info()
+    if artifact_info:
+        source_label = (
+            "local build" if artifact_info["source"] == "local" else f"GitHub Release {artifact_info['tag']}"
+        )
+        st.caption(f"v1.3 artifact source: {source_label}  \nSHA256: `{artifact_info['sha256'][:12]}...`")
 
     # Stale-cache warning: AssetPriceClient's on-disk cache has no TTL of
     # its own (see docs/methodology.md, "Secondary finding"), so this
