@@ -11,6 +11,7 @@ because the process didn't restart.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -18,8 +19,14 @@ import streamlit as st
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-V1_3_PATH = PROCESSED_DIR / "production_v13_daily.parquet"
+from macro_regime.deployment import (  # noqa: E402
+    ArtifactDownloadError,
+    ArtifactValidationError,
+    resolve_artifact_path,
+)
+
 V1_2_PATH = PROCESSED_DIR / "v1_2_regression_daily.parquet"
 BENCHMARKS_PATH = PROCESSED_DIR / "benchmarks_daily.parquet"
 STATUS_PATH = PROCESSED_DIR / "update_all_status.json"
@@ -37,10 +44,40 @@ def _read_parquet(path_str: str, _mtime_key: float) -> pd.DataFrame:
     return df
 
 
+@st.cache_resource(show_spinner="Resolving v1.3 production artifact...")
+def _resolved_v1_3_artifact():
+    """Resolved once per process (not per rerun) via `st.cache_resource`
+    -- a local-path check or a GitHub Release download, never a backtest.
+    Returns None (not an exception) on failure so the caller can render a
+    clear in-app error instead of crashing the whole script."""
+    try:
+        return resolve_artifact_path()
+    except (ArtifactDownloadError, ArtifactValidationError) as exc:
+        return exc
+
+
 def load_v1_3_daily() -> pd.DataFrame | None:
-    if not V1_3_PATH.exists():
+    resolved = _resolved_v1_3_artifact()
+    if isinstance(resolved, Exception):
+        st.error(
+            f"Could not load the v1.3 production artifact: {resolved}\n\n"
+            "This dashboard never computes a backtest itself -- run "
+            "`python -m macro_regime.cli update-all` locally, or check that the "
+            "`v1.3.0` GitHub Release asset is reachable."
+        )
         return None
-    return _read_parquet(str(V1_3_PATH), _mtime(V1_3_PATH))
+    return _read_parquet(str(resolved.path), _mtime(resolved.path))
+
+
+def v1_3_artifact_source_info() -> dict | None:
+    """Diagnostics for the Methodology/sidebar: where the artifact came
+    from (local vs. downloaded), which release tag, and its checksum."""
+    resolved = _resolved_v1_3_artifact()
+    if isinstance(resolved, Exception):
+        return None
+    return {
+        "source": resolved.source, "tag": resolved.tag, "sha256": resolved.sha256, "path": str(resolved.path)
+    }
 
 
 def load_v1_2_regression_daily() -> pd.DataFrame | None:

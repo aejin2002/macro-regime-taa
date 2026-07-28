@@ -457,6 +457,31 @@ launching the app so `data/processed/*` exists -- or just launch the
 app: each page lazily bootstraps its own required data on first visit
 (see `app/streamlit_app.py`'s module docstring).
 
+## Deployment artifact resolution
+
+`data/processed/*` is gitignored -- a fresh deployment checkout (e.g.
+Streamlit Community Cloud) never receives it. `app/ui/data_loader.py`
+resolves `production_v13_daily.parquet` via
+`macro_regime.deployment.artifact_loader.resolve_artifact_path()`:
+
+1. Use the local path if it exists and validates (schema + `strategy_version
+   == v1_3`) -- the normal case after running `update-all` locally.
+2. Otherwise, download the exact asset attached to the
+   [`v1.3.0` GitHub Release](https://github.com/aejin2002/macro-regime-taa/releases/tag/v1.3.0)
+   (pinned by tag, never "latest"), verify its SHA256 against the
+   constant hardcoded in `artifact_loader.py`, and cache it in a writable
+   runtime directory (`MACRO_REGIME_CACHE_DIR`, default: the OS temp
+   dir) so subsequent Streamlit reruns don't re-download.
+
+This resolver **never runs `update-all` and never computes a backtest**
+-- it only locates an already-built artifact or fails loudly
+(`ArtifactDownloadError` / `ArtifactValidationError`) with no silent
+fallback to a different strategy version. A future artifact update
+(v1.3.1, v1.4.0, ...) needs a new GitHub Release tag plus an updated
+`EXPECTED_SHA256`/`RELEASE_TAG` in `artifact_loader.py` -- the pin is
+intentionally not looked up dynamically. The sidebar shows the resolved
+artifact's source (local vs. release) and checksum for diagnostics.
+
 ## Tests and linting
 
 ```bash
