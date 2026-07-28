@@ -15,6 +15,7 @@ than triggering a live fetch if they're missing.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -24,6 +25,35 @@ from streamlit.testing.v1 import AppTest
 APP_PATH = str(Path(__file__).resolve().parents[1] / "app" / "streamlit_app.py")
 APP_SOURCE = Path(APP_PATH).read_text()
 PROCESSED_DIR = Path(__file__).resolve().parents[1] / "data" / "processed"
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
+from ui import data_loader  # noqa: E402
+
+
+class _MockedLivePipelineFailure(RuntimeError):
+    pass
+
+
+def _always_fail_live_pipeline(*, refresh_cache=True):
+    raise _MockedLivePipelineFailure("mocked: live pipeline disabled by default in this test file")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_live_data_state(monkeypatch):
+    """Every test in this file gets a clean slate for the live-data
+    caches, AND the live pipeline is forced to fail immediately by
+    default (network-free) -- so every existing test in this file
+    exercises the exact same release-fallback path the app has always
+    used, matching every pre-existing assertion. Tests that specifically
+    exercise live/session-fallback mode override
+    `data_loader.run_live_production_pipeline` themselves, AFTER this
+    fixture runs, via their own `monkeypatch.setattr`."""
+    data_loader._run_live_pipeline_cached.clear()
+    data_loader._live_result_holder.clear()
+    monkeypatch.setattr(data_loader, "run_live_production_pipeline", _always_fail_live_pipeline)
+    yield
+    data_loader._run_live_pipeline_cached.clear()
+    data_loader._live_result_holder.clear()
 
 REQUIRED_ARTIFACTS = [
     PROCESSED_DIR / "production_v13_daily.parquet",
@@ -429,3 +459,136 @@ def test_performance_figures_unchanged():
     assert metrics["Sharpe"] == "1.14"
     assert metrics["Daily MDD"] == "-16.64%"
     assert metrics["Final Wealth"] == "6.14x"
+
+
+# =============================================================================
+# Live production data: mode, caching, manual refresh, fallback chain
+#
+# Every test below explicitly overrides `data_loader.run_live_production_pipeline`
+# (which the autouse fixture above already points at a network-free stub by
+# default) -- none of this ever touches FRED or Yahoo Finance.
+# =============================================================================
+
+
+def _mock_live_result(fetched_at=None):
+    v13 = pd.read_parquet(PROCESSED_DIR / "production_v13_daily.parquet")
+    bench = pd.read_parquet(PROCESSED_DIR / "benchmarks_daily.parquet")
+    vix = pd.Series([15.0, 16.5, 14.2], index=pd.date_range("2026-07-26", periods=3), name="VIXCLS")
+    return {
+        "v1_3_df": v13,
+        "bench_df": bench,
+        "vix_series": vix,
+        "fetched_at": fetched_at or pd.Timestamp("2026-07-29 03:00:00"),
+    }
+
+
+def _mock_live_success(*, refresh_cache=True, calls=None):
+    if calls is not None:
+        calls.append(1)
+    return _mock_live_result()
+
+
+def test_live_mode_shows_live_badge_and_last_refresh_time(monkeypatch):
+    monkeypatch.setattr(data_loader, "run_live_production_pipeline", _mock_live_success)
+    at = _run()
+    sidebar_text = " ".join(m.value for m in at.sidebar.markdown if m.value)
+    assert "🟢 Live" in sidebar_text
+    assert "2026-07-29 03:00:00" in sidebar_text
+    assert not at.exception
+
+
+def test_release_fallback_never_shows_live_badge():
+    """Default fixture state (live pipeline always fails, no prior
+    success) -- must show the fallback badge, never claim to be live."""
+    at = _run()
+    sidebar_text = " ".join(m.value for m in at.sidebar.markdown if m.value)
+    assert "🔵 Release fallback" in sidebar_text
+    assert "🟢 Live" not in sidebar_text
+
+
+def test_repeated_run_within_ttl_does_not_recall_pipeline(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        data_loader, "run_live_production_pipeline", lambda **kw: _mock_live_success(calls=calls, **kw)
+    )
+    _run()
+    _run()
+    assert len(calls) == 1, "second AppTest run must reuse the cached live result, not re-fetch"
+
+
+def test_manual_refresh_button_forces_recall(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        data_loader, "run_live_production_pipeline", lambda **kw: _mock_live_success(calls=calls, **kw)
+    )
+    at = _run()
+    assert len(calls) == 1
+    at.sidebar.button[0].click().run()
+    assert len(calls) == 2, "clicking Refresh latest data must bypass the TTL cache and re-fetch"
+    assert not at.exception
+
+
+def test_live_failure_with_prior_success_falls_back_to_session_cache(monkeypatch):
+    monkeypatch.setattr(data_loader, "run_live_production_pipeline", _mock_live_success)
+    _run()  # populates _live_result_holder with a successful live result
+
+    def _fail(**kw):
+        raise RuntimeError("mock: live refresh failed on retry")
+
+    monkeypatch.setattr(data_loader, "run_live_production_pipeline", _fail)
+    data_loader._run_live_pipeline_cached.clear()  # simulate TTL expiry forcing a fresh attempt
+    at = _run()
+    sidebar_text = " ".join(m.value for m in at.sidebar.markdown if m.value)
+    assert "🟡 Cached live (stale)" in sidebar_text
+    assert not at.exception
+
+
+def test_live_failure_with_no_prior_success_falls_back_to_release():
+    """Default fixture state IS this scenario -- named explicitly here
+    per the spec's required fallback-chain test."""
+    at = _run()
+    assert not at.exception
+    sidebar_text = " ".join(m.value for m in at.sidebar.markdown if m.value)
+    assert "🔵 Release fallback" in sidebar_text
+    # And the app still renders real numbers from the static artifact --
+    # fallback is never blank/broken.
+    overview = at.tabs[OVERVIEW]
+    metrics = {m.label: m.value for m in overview.metric}
+    assert metrics["CAGR"] == "11.12%"
+
+
+def test_vix_renders_real_chart_in_live_mode(monkeypatch):
+    monkeypatch.setattr(data_loader, "run_live_production_pipeline", _mock_live_success)
+    at = _run()
+    markets = at.tabs[MARKETS]
+    series_selector = [m for m in markets.multiselect if m.label == "Series"][0]
+    series_selector.set_value(["VIX — CBOE Volatility Index"]).run()
+    markets2 = at.tabs[MARKETS]
+    specs = _plotly_specs(markets2)
+    titles = [s.get("layout", {}).get("title", {}).get("text", "") for s in specs]
+    assert any(t.startswith("VIX") for t in titles)
+    caption_text = " ".join(c.value for c in markets2.caption if c.value)
+    assert "unavailable" not in caption_text.lower()
+
+
+def test_vix_still_shows_unavailable_in_release_fallback_mode():
+    """Default fixture state (fallback mode) -- VIX must still show the
+    honest 'unavailable' message, never fabricated data."""
+    at = _run()
+    markets = at.tabs[MARKETS]
+    series_selector = [m for m in markets.multiselect if m.label == "Series"][0]
+    series_selector.set_value(["VIX — CBOE Volatility Index"]).run()
+    markets2 = at.tabs[MARKETS]
+    caption_text = " ".join(c.value for c in markets2.caption if c.value)
+    assert "unavailable" in caption_text.lower()
+
+
+def test_release_fallback_error_never_shown_as_stack_trace(monkeypatch):
+    """A live failure's error text is compact (an exception message),
+    never a raw Python traceback dumped into the general UI."""
+    at = _run()
+    sidebar_text = " ".join(m.value for m in at.sidebar.markdown if m.value)
+    assert "Traceback (most recent call last)" not in sidebar_text
+    for tab in at.tabs:
+        rendered = " ".join(m.value for m in tab.markdown if m.value)
+        assert "Traceback (most recent call last)" not in rendered

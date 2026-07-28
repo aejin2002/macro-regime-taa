@@ -39,10 +39,10 @@ from ui import charts, components  # noqa: E402
 from ui.data_loader import (  # noqa: E402
     benchmarks_artifact_source_info,
     data_freshness_summary,
-    load_benchmarks_daily,
+    get_dashboard_data,
     load_pipeline_status,
     load_v1_2_regression_daily,
-    load_v1_3_daily,
+    refresh_live_data_now,
     v1_3_artifact_source_info,
 )
 from ui.formatters import fmt_date, fmt_int, fmt_num, fmt_pct  # noqa: E402
@@ -103,21 +103,24 @@ def _cached_config() -> dict:
 
 
 def _load_all():
-    v13 = load_v1_3_daily()
+    data = get_dashboard_data()
     v12 = load_v1_2_regression_daily()
-    bench = load_benchmarks_daily()
-    freshness = data_freshness_summary()
     status = load_pipeline_status()
-    return v13, v12, bench, freshness, status
+    freshness = data_freshness_summary(data["v1_3_df"], data["bench_df"], status)
+    return data, v12, freshness, status
 
 
-v13_raw, v12_raw, bench_raw, freshness, pipeline_status = _load_all()
+dashboard_data, v12_raw, freshness, pipeline_status = _load_all()
+v13_raw = dashboard_data["v1_3_df"]
+bench_raw = dashboard_data["bench_df"]
+live_vix_series = dashboard_data["vix_series"]
 
 if v13_raw is None or v13_raw.empty:
     st.error(
-        "No v1.3 production artifact found (`data/processed/production_v13_daily.parquet`). "
-        "Run `python -m macro_regime.cli update-all` first -- this dashboard never computes "
-        "a backtest itself."
+        "Could not load v1.3 production data -- the live production pipeline and the "
+        f"`v1.3.0` GitHub Release fallback both failed.\n\nLast error: {dashboard_data.get('error')}\n\n"
+        "This dashboard never shows fabricated data -- check FRED/Yahoo Finance connectivity, "
+        "the `FRED_API_KEY` secret, or that the GitHub Release asset is reachable."
     )
     st.stop()
 
@@ -193,9 +196,39 @@ def capture_ratios(returns: pd.Series, spy_returns: pd.Series) -> tuple[float, f
 # Sidebar -- shared "as of" summary, always visible
 # =============================================================================
 
+DATA_MODE_LABELS = {
+    "live": ("🟢 Live", "Freshly fetched from FRED/Yahoo Finance and recomputed this refresh cycle."),
+    "session_fallback": (
+        "🟡 Cached live (stale)",
+        "The latest live refresh attempt failed -- showing the last successful live result "
+        "from this session instead of jumping straight to the frozen Release artifact.",
+    ),
+    "release_fallback": (
+        "🔵 Release fallback",
+        "Live refresh failed with no prior live result available -- showing the immutable "
+        "`v1.3.0` GitHub Release artifact.",
+    ),
+}
+
 with st.sidebar:
     st.markdown("### Macro Regime TAA v1.3")
     st.caption(DISPLAY_NAMES.get("v1_3", "v1.3"))
+
+    mode = dashboard_data["mode"]
+    mode_label, mode_note = DATA_MODE_LABELS.get(mode, ("Unknown", ""))
+    st.markdown(f"**Production data mode**  \n{mode_label}")
+    st.caption(mode_note)
+    if dashboard_data.get("fetched_at") is not None:
+        fetched_label = dashboard_data["fetched_at"].strftime("%Y-%m-%d %H:%M:%S")
+        st.markdown(f"**Last successful live refresh**  \n{fetched_label}")
+    if dashboard_data.get("error"):
+        with st.expander("Refresh error detail"):
+            st.code(dashboard_data["error"])
+
+    if st.button("🔄 Refresh latest data", width="stretch"):
+        refresh_live_data_now()
+        st.rerun()
+
     st.markdown(
         f"**Dashboard generated**  \n{freshness['dashboard_generated_at'].strftime('%Y-%m-%d %H:%M')}"
     )
@@ -210,49 +243,49 @@ with st.sidebar:
         f"**Current macro allocation effective from**  \n"
         f"{fmt_date(freshness['current_macro_allocation_effective_from'])}"
     )
-    if pipeline_status:
-        st.caption(f"Pipeline last completed: {pipeline_status.get('completed_at', 'n/a')[:19]}")
 
-    artifact_info = v1_3_artifact_source_info()
-    if artifact_info:
-        source_label = (
-            "local build" if artifact_info["source"] == "local" else f"GitHub Release {artifact_info['tag']}"
-        )
-        st.caption(f"v1.3 artifact source: {source_label}  \nSHA256: `{artifact_info['sha256'][:12]}...`")
+    if mode == "release_fallback":
+        if pipeline_status:
+            st.caption(f"Pipeline last completed: {pipeline_status.get('completed_at', 'n/a')[:19]}")
 
-    bench_artifact_info = benchmarks_artifact_source_info()
-    if bench_artifact_info:
-        bench_source_label = (
-            "local build"
-            if bench_artifact_info["source"] == "local"
-            else f"GitHub Release {bench_artifact_info['tag']}"
-        )
-        st.caption(
-            f"Benchmarks artifact source: {bench_source_label}  \n"
-            f"SHA256: `{bench_artifact_info['sha256'][:12]}...`"
-        )
+        artifact_info = v1_3_artifact_source_info()
+        if artifact_info:
+            source_label = (
+                "local build"
+                if artifact_info["source"] == "local"
+                else f"GitHub Release {artifact_info['tag']}"
+            )
+            st.caption(f"v1.3 artifact source: {source_label}  \nSHA256: `{artifact_info['sha256'][:12]}...`")
 
-    # Stale-cache warning: AssetPriceClient's on-disk cache has no TTL of
-    # its own (see docs/methodology.md, "Secondary finding"), so this
-    # dashboard checks its age explicitly rather than trusting it's
-    # fresh just because a file exists. Checks the SAME (ticker, start)
-    # key `fast_crisis.daily_data.load_daily_prices` actually uses, so a
-    # "stale" reading here means the NEXT `update-all` run will refetch
-    # rather than silently reuse an old value (refresh_cache defaults to
-    # True there regardless of this reading -- this is a display-only
-    # signal, it never changes what data gets used).
-    try:
-        from macro_regime.data.asset_prices import AssetPriceClient as _APC
+        bench_artifact_info = benchmarks_artifact_source_info()
+        if bench_artifact_info:
+            bench_source_label = (
+                "local build"
+                if bench_artifact_info["source"] == "local"
+                else f"GitHub Release {bench_artifact_info['tag']}"
+            )
+            st.caption(
+                f"Benchmarks artifact source: {bench_source_label}  \n"
+                f"SHA256: `{bench_artifact_info['sha256'][:12]}...`"
+            )
 
-        _cache_status = _APC().get_cache_status("SPY", "2008-01-01", ttl_seconds=24 * 3600)
-    except Exception:  # noqa: BLE001
-        _cache_status = None
-    if _cache_status and _cache_status.get("is_stale"):
-        age_h = (_cache_status["age_seconds"] or 0) / 3600
-        st.warning(
-            f"⚠️ Asset-price cache last refreshed {age_h:.1f}h ago (>24h) -- "
-            f"run `update-all` to refresh before trusting the latest date."
-        )
+        # Stale-cache warning: AssetPriceClient's on-disk cache has no TTL
+        # of its own, so this checks its age explicitly rather than
+        # trusting it's fresh just because a file exists. Only meaningful
+        # in fallback mode -- live mode always fetches with
+        # refresh_cache=True, bypassing this cache entirely.
+        try:
+            from macro_regime.data.asset_prices import AssetPriceClient as _APC
+
+            _cache_status = _APC().get_cache_status("SPY", "2008-01-01", ttl_seconds=24 * 3600)
+        except Exception:  # noqa: BLE001
+            _cache_status = None
+        if _cache_status and _cache_status.get("is_stale"):
+            age_h = (_cache_status["age_seconds"] or 0) / 3600
+            st.warning(
+                f"⚠️ Asset-price cache last refreshed {age_h:.1f}h ago (>24h) -- "
+                f"run `update-all` to refresh before trusting the latest date."
+            )
 
 tab_overview, tab_markets, tab_performance, tab_signals, tab_methodology = st.tabs(
     ["Overview", "Markets", "Performance", "Signals", "Methodology"]
@@ -536,12 +569,22 @@ with tab_markets:
         unit_label = MARKET_SERIES_UNIT[series_key]
         with st.container(border=True):
             if series_key == "vix":
-                st.markdown(f"**{label}**")
-                st.caption(
-                    "Data unavailable -- VIX is not currently included in the deployed "
-                    "production or benchmarks artifact. No raw CSV or live API fallback "
-                    "is used here; see Methodology for the minimal artifact change that "
-                    "would add it."
+                if live_vix_series is None or live_vix_series.empty:
+                    st.markdown(f"**{label}**")
+                    st.caption(
+                        "Data unavailable -- this dashboard is currently showing the Release "
+                        "fallback (not a live refresh), and VIX is not included in the frozen "
+                        "production/benchmarks artifact. No raw CSV or non-FRED live fallback "
+                        "is used here; VIX resolves automatically once a live refresh succeeds "
+                        "(it is fetched from FRED as part of the normal macro data pull)."
+                    )
+                    continue
+                st.caption(f"as of {fmt_date(live_vix_series.index.max())}  ·  {unit_label}")
+                vix_window = live_vix_series if n_days is None else live_vix_series.iloc[-n_days:]
+                st.plotly_chart(
+                    charts.single_series_chart(vix_window, f"{label} -- {unit_label}"),
+                    width="stretch",
+                    key=f"mkt_series_{series_key}",
                 )
                 continue
             frame = bench_frame(series_key)

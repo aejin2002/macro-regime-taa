@@ -1,11 +1,21 @@
-"""Read-only Streamlit data access -- loads the canonical parquet
-artifacts built by `python -m macro_regime.cli update-all`. Streamlit
-itself never fetches data or runs a backtest; it only renders what the
-pipeline already computed. Cache keys include each file's own mtime, so
-a stale `st.cache_data` entry is automatically invalidated the moment a
-fresh pipeline run rewrites the artifact -- no manual "clear cache"
-button needed, and a rerun can never keep showing yesterday's data just
-because the process didn't restart.
+"""Streamlit data access -- two layers.
+
+1. Live: `get_dashboard_data()` runs the real production pipeline
+   (`macro_regime.deployment.live_pipeline`) against fresh FRED/Yahoo
+   Finance data, cached up to `LIVE_REFRESH_TTL_SECONDS` so a normal
+   widget rerun/tab switch never re-triggers a fetch. This is the
+   PRIMARY path -- the dashboard is a live production view, not a
+   static artifact viewer.
+2. Fallback: `load_v1_3_daily()`/`load_benchmarks_daily()` -- the
+   original local-first/GitHub-Release-fallback static loader,
+   unchanged. `get_dashboard_data()` falls back to this tier only when
+   a live attempt fails and no prior-in-process live result exists to
+   reuse. The Release artifact remains the reproducibility/disaster-
+   recovery anchor -- see `docs/methodology.md`.
+
+Cache keys for the fallback tier include each file's own mtime, so a
+stale `st.cache_data` entry is automatically invalidated the moment a
+fresh local pipeline run rewrites the artifact.
 """
 
 from __future__ import annotations
@@ -26,7 +36,16 @@ from macro_regime.deployment import (  # noqa: E402
     ArtifactValidationError,
     resolve_artifact_path,
     resolve_benchmarks_artifact_path,
+    run_live_production_pipeline,
 )
+
+# FRED is mostly monthly-frequency and Yahoo Finance closes once/day, so
+# refetching more often than this buys negligible freshness for a
+# ~30-70s full pipeline run (see the live-pipeline architecture report).
+# TTL expiry and the sidebar's "Refresh latest data" button are the only
+# two triggers -- an ordinary rerun (tab switch, widget change) within
+# this window reuses the cached result, never re-fetching/recomputing.
+LIVE_REFRESH_TTL_SECONDS = 3600
 
 V1_2_PATH = PROCESSED_DIR / "v1_2_regression_daily.parquet"
 STATUS_PATH = PROCESSED_DIR / "update_all_status.json"
@@ -127,14 +146,26 @@ def load_pipeline_status() -> dict | None:
         return None
 
 
-def data_freshness_summary() -> dict:
+def data_freshness_summary(
+    v1_3: pd.DataFrame | None = None, bench: pd.DataFrame | None = None, status: dict | None = None
+) -> dict:
     """Every distinct 'as of' date the UI needs to show separately (see
     docs/methodology.md, 'Date concepts'). Never backfills a missing
     artifact with a guess -- a `None` here must render as 'unavailable',
-    not as today's date."""
-    v1_3 = load_v1_3_daily()
-    bench = load_benchmarks_daily()
-    status = load_pipeline_status()
+    not as today's date.
+
+    Takes `v1_3`/`bench` as parameters (rather than loading them itself)
+    so the SAME freshness rules apply whether the data came from a live
+    pipeline run or the Release-artifact fallback -- callers pass
+    `get_dashboard_data()`'s DataFrames. Falls back to the static loader
+    only if a caller omits them (keeps this callable standalone, e.g.
+    from a REPL/test)."""
+    if v1_3 is None:
+        v1_3 = load_v1_3_daily()
+    if bench is None:
+        bench = load_benchmarks_daily()
+    if status is None:
+        status = load_pipeline_status()
 
     market_date = v1_3["date"].max() if v1_3 is not None and len(v1_3) else None
     macro_month = None
@@ -167,3 +198,72 @@ def data_freshness_summary() -> dict:
         "current_macro_allocation_effective_from": macro_month,
         "pipeline_status": status,
     }
+
+
+# =============================================================================
+# Live production data -- primary path
+# =============================================================================
+
+
+@st.cache_resource
+def _live_result_holder() -> dict:
+    """Process-wide (not per-browser-session) mutable holder for the
+    last successful live pipeline result -- deliberately outlives that
+    result's own TTL cache entry, so a LATER failed refresh attempt
+    still has something better than jumping straight to the frozen
+    Release artifact. Cleared only by a full process restart."""
+    return {}
+
+
+@st.cache_data(
+    ttl=LIVE_REFRESH_TTL_SECONDS,
+    show_spinner="Refreshing live production data (FRED + Yahoo Finance)...",
+)
+def _run_live_pipeline_cached() -> dict:
+    return run_live_production_pipeline(refresh_cache=True)
+
+
+def refresh_live_data_now() -> None:
+    """Sidebar 'Refresh latest data' button handler -- forces the next
+    `get_dashboard_data()` call to bypass the TTL cache and re-run the
+    live pipeline immediately."""
+    _run_live_pipeline_cached.clear()
+
+
+def get_dashboard_data() -> dict:
+    """The single entry point the app uses for v1.3/benchmark data.
+    Three tiers, in order, never raising:
+
+    1. "live" -- a fresh (or TTL-cached) live pipeline run.
+    2. "session_fallback" -- a live attempt just failed, but a PRIOR
+       live run in this process succeeded; that result is reused
+       (marked stale) rather than jumping straight to tier 3.
+    3. "release_fallback" -- the unchanged local-first/GitHub-Release
+       static loader, used only when both live tiers are unavailable.
+
+    Returns a dict with `v1_3_df`, `bench_df`, `vix_series`,
+    `fetched_at`, `mode`, `error` -- `mode` lets the caller render an
+    accurate status rather than silently mixing tiers."""
+    holder = _live_result_holder()
+    try:
+        raw = _run_live_pipeline_cached()
+        holder["last_good"] = raw
+        return {**raw, "mode": "live", "error": None}
+    except Exception as exc:  # noqa: BLE001
+        if "last_good" in holder:
+            return {**holder["last_good"], "mode": "session_fallback", "error": str(exc)}
+        v1_3_df = load_v1_3_daily()
+        bench_df = load_benchmarks_daily()
+        if v1_3_df is None or v1_3_df.empty:
+            return {
+                "v1_3_df": None, "bench_df": None, "vix_series": None, "fetched_at": None,
+                "mode": "error", "error": str(exc),
+            }
+        return {
+            "v1_3_df": v1_3_df,
+            "bench_df": bench_df,
+            "vix_series": None,
+            "fetched_at": None,
+            "mode": "release_fallback",
+            "error": str(exc),
+        }
