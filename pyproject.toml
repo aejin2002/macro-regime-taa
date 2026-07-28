@@ -59,6 +59,7 @@ packages = [
 [tool.ruff]
 line-length = 110
 target-version = "py311"
+exclude = [".analysis"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

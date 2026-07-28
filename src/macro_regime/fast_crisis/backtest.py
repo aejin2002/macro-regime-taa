@@ -35,9 +35,14 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from macro_regime.backtest.allocations import regime_allocations
+from macro_regime.backtest.allocations import regime_allocations, static_6040_allocation
 from macro_regime.backtest.assets import build_monthly_return_matrix
-from macro_regime.backtest.engine import StrategyResult, build_target_weights_from_regime, run_strategy
+from macro_regime.backtest.engine import (
+    StrategyResult,
+    build_target_weights_from_regime,
+    constant_target_weights,
+    run_strategy,
+)
 from macro_regime.data.asset_prices import AssetPriceClient
 from macro_regime.duration_gate.allocation import apply_bei_duration_gate
 from macro_regime.duration_gate.signal import UNKNOWN as BEI_UNKNOWN
@@ -57,10 +62,13 @@ from macro_regime.fast_crisis.signal import (
     compute_credit_shock,
     compute_equity_shock,
     compute_vix_shock,
+    n_day_return_diagnostic,
+    vix_shock_diagnostics,
 )
 
 V1_1_LABEL = "v1_1_daily"
 V1_2_LABEL = "v1_2_fast_crisis"
+BENCHMARK_LABEL = "benchmark_60_40"
 
 
 @dataclass
@@ -73,15 +81,21 @@ class FastCrisisBacktest:
     monthly_returns: pd.DataFrame
     turnover_breakdown: pd.DataFrame
     current_status: dict
+    bei_signal: pd.DataFrame  # raw/tradable BEI Duration Gate table (see build_bei_duration_gate_signal)
 
 
 def _build_v1_1_monthly_target(
     config: dict, primary_regime: pd.Series, wide: pd.DataFrame, monthly_asset_returns: pd.DataFrame
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """v1.1's own monthly target: Primary v1.0 regime allocation, with
     the BEI Duration Risk Gate applied on top -- byte-for-byte the same
     construction `duration_gate.backtest.run_bei_duration_gate_backtest`
-    uses, reusing the same unmodified functions (not reimplemented)."""
+    uses, reusing the same unmodified functions (not reimplemented).
+    Returns (regime_only_target, bei_gated_target, bei_signal) -- the
+    regime-only stage is exposed purely for display (the "Macro Base"
+    step of a Macro -> BEI -> Fast Crisis waterfall) and `bei_signal` is
+    the full raw/tradable monthly gate table; neither changes any
+    computation, only what is returned."""
     gconf = config["bei_duration_gate"]
     allocations_by_regime = regime_allocations(config)
     columns = list(monthly_asset_returns.columns)
@@ -95,20 +109,43 @@ def _build_v1_1_monthly_target(
     tradable_gate = bei_signal["tradable_bei_duration_gate"].reindex(monthly_asset_returns.index)
     tradable_gate = tradable_gate.fillna(BEI_UNKNOWN)
 
-    return apply_bei_duration_gate(
+    overlay_target = apply_bei_duration_gate(
         base_target,
         tradable_gate,
         ief_weight_when_on=gconf["ief_weight_when_on"],
         bil_weight_when_on=gconf["bil_weight_when_on"],
     )
+    return base_target, overlay_target, bei_signal
 
 
 def _broadcast_monthly_onto_daily(monthly: pd.Series | pd.DataFrame, daily_index: pd.DatetimeIndex):
     """Maps each daily date to ITS OWN calendar month's monthly value --
     not a temporal ffill (which has nothing to fill the first ~20
-    trading days of a month from)."""
-    period_to_label = dict(zip(monthly.index.to_period("M"), monthly.index, strict=True))
-    mapped_labels = [period_to_label[p] for p in daily_index.to_period("M")]
+    trading days of a month from). A daily date in a calendar month that
+    is STILL OPEN (later than the monthly series' own last period -- the
+    monthly signal/target can only ever be computed once a month has
+    closed) instead holds the LAST available monthly value forward. This
+    is exactly "keep the most recently decided target until the next
+    monthly rebalance" -- it uses no information from an unpublished
+    period and is never a lookahead. A gap strictly BEFORE the monthly
+    series' own range is a real data problem and still raises loudly."""
+    monthly_periods = monthly.index.to_period("M")
+    period_to_label = dict(zip(monthly_periods, monthly.index, strict=True))
+    last_period = monthly_periods.max()
+    last_label = period_to_label[last_period]
+    daily_periods = daily_index.to_period("M")
+    mapped_labels = [
+        period_to_label[p] if p in period_to_label else (last_label if p > last_period else None)
+        for p in daily_periods
+    ]
+    if any(label is None for label in mapped_labels):
+        missing = sorted(
+            {str(d.date()) for d, lbl in zip(daily_index, mapped_labels, strict=True) if lbl is None}
+        )
+        raise ValueError(
+            f"No monthly value available for daily date(s) before the monthly series' own start: "
+            f"{missing[:5]}"
+        )
     result = monthly.loc[mapped_labels].copy()
     result.index = daily_index
     return result
@@ -129,7 +166,9 @@ def run_fast_crisis_backtest(
     cost_bps = bconf["transaction_cost_bps"]
 
     monthly_asset_returns, _ = build_monthly_return_matrix(config, client=client, as_of=as_of)
-    v1_1_monthly_target = _build_v1_1_monthly_target(config, primary_regime, wide, monthly_asset_returns)
+    v1_0_monthly_target, v1_1_monthly_target, bei_signal = _build_v1_1_monthly_target(
+        config, primary_regime, wide, monthly_asset_returns
+    )
 
     raw = load_daily_prices(config, wide["VIXCLS"], client=client, refresh_cache=refresh_cache)
     daily_returns, vix_daily = build_daily_return_matrix(raw, as_of=as_of)
@@ -137,7 +176,14 @@ def run_fast_crisis_backtest(
     first_month = v1_1_monthly_target.index.min()
     not_before = pd.Timestamp(f"{first_month.year}-{first_month.month:02d}-01")
     common_start = determine_common_start(daily_returns, vix_daily, not_before=not_before)
-    end_date = min(daily_returns.index.max(), v1_1_monthly_target.index.max())
+    # Daily portfolio/benchmark valuation extends through the latest
+    # available trading day (bounded only by `as_of` and by what the
+    # asset-price data actually covers) -- NOT capped at the monthly
+    # macro target's own last CLOSED month. Days in a still-open current
+    # month use last month's already-decided target, held forward by
+    # `_broadcast_monthly_onto_daily` (no lookahead: nothing from the
+    # open month is used to pick that target).
+    end_date = daily_returns.index.max()
     in_range = (daily_returns.index >= common_start) & (daily_returns.index <= end_date)
     daily_index = daily_returns.index[in_range]
     daily_returns = daily_returns.loc[daily_index]
@@ -169,8 +215,20 @@ def run_fast_crisis_backtest(
     )
     crisis_mode = state["crisis_mode"]
 
+    # Raw numeric values each shock thresholds against -- display/
+    # diagnostic only, computed by the same formulas as the shock
+    # classifications above (never re-derived differently).
+    vix_diag = vix_shock_diagnostics(vix_daily, ma_window_days=fconf["vix_ma_window_days"])
+    spy_5d_return = n_day_return_diagnostic(
+        daily_returns["spy"], window_days=fconf["equity_shock_window_days"]
+    )
+    hyg_5d_return = n_day_return_diagnostic(
+        daily_returns["high_yield"], window_days=fconf["credit_shock_window_days"]
+    )
+
     # -- v1.1 daily target (v1.1's monthly target broadcast onto the daily calendar) --
     v1_1_daily_target = _broadcast_monthly_onto_daily(v1_1_monthly_target, daily_index)
+    v1_0_daily_target = _broadcast_monthly_onto_daily(v1_0_monthly_target, daily_index)
     regime_monthly = primary_regime.reindex(v1_1_monthly_target.index)
     macro_regime_daily = _broadcast_monthly_onto_daily(regime_monthly, daily_index)
 
@@ -184,12 +242,25 @@ def run_fast_crisis_backtest(
     mode_change.iloc[0] = False
     v1_2_rebalance_mask = is_new_month | mode_change
 
+    # Benchmark: the project's EXISTING static 60/40 definition (config's
+    # `backtest.static_6040` -- Growth Basket 60% / intermediate_treasury
+    # 40%, expanded via `static_6040_allocation`, same function `run-backtest`
+    # uses), evaluated on the identical daily calendar/asset data as v1.1/v1.2
+    # (monthly rebalance) purely so its NAV is directly comparable -- the
+    # weights and rebalance rule are not redefined here.
+    benchmark_target = constant_target_weights(
+        static_6040_allocation(config), daily_index, list(daily_returns.columns)
+    )
+
     results: dict[str, StrategyResult] = {
         V1_1_LABEL: run_strategy(
             daily_returns, v1_1_daily_target, is_new_month, transaction_cost_bps=cost_bps
         ),
         V1_2_LABEL: run_strategy(
             daily_returns, v1_2_daily_target, v1_2_rebalance_mask, transaction_cost_bps=cost_bps
+        ),
+        BENCHMARK_LABEL: run_strategy(
+            daily_returns, benchmark_target, is_new_month, transaction_cost_bps=cost_bps
         ),
     }
 
@@ -200,11 +271,15 @@ def run_fast_crisis_backtest(
     )
 
     turnover_breakdown = _build_turnover_breakdown(results, is_new_month, mode_change)
+    last_closed_month = v1_1_monthly_target.index.to_period("M").max()
+    partial_month = pd.Series(daily_index.to_period("M") > last_closed_month, index=daily_index)
     allocations = _build_allocations_table(
-        daily_returns, macro_regime_daily, v1_1_daily_target, v1_2_daily_target, state
+        daily_returns, macro_regime_daily, v1_0_daily_target, v1_1_daily_target, v1_2_daily_target, state,
+        partial_month,
     )
     current_status = _build_current_status(
         macro_regime_daily,
+        v1_0_daily_target,
         v1_1_daily_target,
         v1_2_daily_target,
         state,
@@ -212,12 +287,19 @@ def run_fast_crisis_backtest(
         vix_shock,
         equity_shock,
         credit_shock,
-        min_hold_days=fconf["min_hold_days"],
-        min_off_days_to_exit=fconf["min_off_days_to_exit"],
+        vix_diag,
+        spy_5d_return,
+        hyg_5d_return,
+        fconf,
     )
 
     return FastCrisisBacktest(
         signal_table=allocations.assign(
+            vix_level=vix_diag["vix_level"].reindex(daily_index),
+            vix_ma=vix_diag["vix_ma"].reindex(daily_index),
+            vix_ratio=vix_diag["vix_ratio"].reindex(daily_index),
+            spy_5d_return=spy_5d_return.reindex(daily_index),
+            hyg_5d_return=hyg_5d_return.reindex(daily_index),
             vix_shock=vix_shock.reindex(daily_index),
             equity_shock=equity_shock.reindex(daily_index),
             credit_shock=credit_shock.reindex(daily_index),
@@ -231,6 +313,7 @@ def run_fast_crisis_backtest(
         monthly_returns=monthly_returns,
         turnover_breakdown=turnover_breakdown,
         current_status=current_status,
+        bei_signal=bei_signal,
     )
 
 
@@ -259,18 +342,35 @@ def _build_turnover_breakdown(
 def _build_allocations_table(
     daily_returns: pd.DataFrame,
     macro_regime_daily: pd.Series,
+    v1_0_daily_target: pd.DataFrame,
     v1_1_daily_target: pd.DataFrame,
     v1_2_daily_target: pd.DataFrame,
     state: pd.DataFrame,
+    partial_month: pd.Series,
 ) -> pd.DataFrame:
+    """Four-stage weight waterfall, one column group per stage:
+    `macro_*` (Primary v1.0 regime allocation only), `bei_*` (v1.1,
+    Macro + BEI Duration Risk Gate -- the `base_*` name is kept
+    alongside as an alias for backward compatibility with existing
+    readers of this CSV), `final_*` (v1.2, Macro + BEI + Fast Crisis
+    Overlay). Each stage is exactly what `run_fast_crisis_backtest`
+    already computed -- this function only arranges it for display, it
+    computes nothing new. `partial_month` (bool) marks days whose
+    calendar month has no monthly macro target of its own yet -- the
+    prior month's already-decided target is being held forward for
+    them (see `_broadcast_monthly_onto_daily`)."""
     base_crisis_sum = v1_1_daily_target[CRISIS_ASSET_COLUMNS].sum(axis=1)
     final_crisis_sum = v1_2_daily_target[CRISIS_ASSET_COLUMNS].sum(axis=1)
     removed = base_crisis_sum - final_crisis_sum
     allocations = pd.DataFrame(index=daily_returns.index)
     allocations["macro_regime"] = macro_regime_daily
     allocations["crisis_mode"] = state["crisis_mode"]
+    allocations["partial_month"] = partial_month
+    for col in v1_0_daily_target.columns:
+        allocations[f"macro_{col}"] = v1_0_daily_target[col]
     for col in v1_1_daily_target.columns:
-        allocations[f"base_{col}"] = v1_1_daily_target[col]
+        allocations[f"bei_{col}"] = v1_1_daily_target[col]
+        allocations[f"base_{col}"] = v1_1_daily_target[col]  # alias, kept for existing readers
     for col in v1_2_daily_target.columns:
         allocations[f"final_{col}"] = v1_2_daily_target[col]
     allocations["crisis_removed_weight"] = removed
@@ -278,8 +378,22 @@ def _build_allocations_table(
     return allocations
 
 
+def _current_crisis_entry_date(crisis_mode: pd.Series) -> str | None:
+    """If currently ON, the first date of the consecutive ON run ending
+    at the last observation -- display/diagnostic only, derived from
+    the already-computed `crisis_mode` series, not a new calculation."""
+    if crisis_mode.empty or crisis_mode.iloc[-1] != ON:
+        return None
+    is_on = (crisis_mode == ON).to_numpy()
+    idx = len(is_on) - 1
+    while idx > 0 and is_on[idx - 1]:
+        idx -= 1
+    return str(crisis_mode.index[idx].date())
+
+
 def _build_current_status(
     macro_regime_daily: pd.Series,
+    v1_0_daily_target: pd.DataFrame,
     v1_1_daily_target: pd.DataFrame,
     v1_2_daily_target: pd.DataFrame,
     state: pd.DataFrame,
@@ -287,10 +401,13 @@ def _build_current_status(
     vix_shock: pd.Series,
     equity_shock: pd.Series,
     credit_shock: pd.Series,
-    *,
-    min_hold_days: int,
-    min_off_days_to_exit: int,
+    vix_diag: pd.DataFrame,
+    spy_5d_return: pd.Series,
+    hyg_5d_return: pd.Series,
+    fconf: dict,
 ) -> dict:
+    min_hold_days = fconf["min_hold_days"]
+    min_off_days_to_exit = fconf["min_off_days_to_exit"]
     last = state.index[-1]
     days_in_mode = int(state.loc[last, "days_in_mode"])
     consecutive_off = int(state.loc[last, "consecutive_off_count"])
@@ -304,11 +421,21 @@ def _build_current_status(
         "as_of": str(last.date()),
         "macro_regime": str(macro_regime_daily.loc[last]),
         "vix_shock": str(vix_shock.loc[last]),
+        "vix_level": float(vix_diag.loc[last, "vix_level"]),
+        "vix_ma": float(vix_diag.loc[last, "vix_ma"]),
+        "vix_ratio": float(vix_diag.loc[last, "vix_ratio"]),
+        "vix_threshold": fconf["vix_threshold"],
+        "vix_ma_ratio_threshold": fconf["vix_ma_ratio_threshold"],
         "equity_shock": str(equity_shock.loc[last]),
+        "spy_5d_return": float(spy_5d_return.loc[last]) if pd.notna(spy_5d_return.loc[last]) else None,
+        "equity_shock_threshold": fconf["equity_shock_threshold"],
         "credit_shock": str(credit_shock.loc[last]),
+        "hyg_5d_return": float(hyg_5d_return.loc[last]) if pd.notna(hyg_5d_return.loc[last]) else None,
+        "credit_shock_threshold": fconf["credit_shock_threshold"],
         "raw_trigger": str(raw_trigger.loc[last]),
         "tradable_trigger": str(state.loc[last, "tradable_trigger"]),
         "crisis_mode": str(state.loc[last, "crisis_mode"]),
+        "crisis_entry_date": _current_crisis_entry_date(state["crisis_mode"]),
         "days_in_mode": days_in_mode,
         "consecutive_off_days": consecutive_off,
         "min_hold_days_satisfied": min_hold_satisfied if in_mode else None,
@@ -317,6 +444,7 @@ def _build_current_status(
         "next_exit_eligible": bool(
             in_mode and min_hold_satisfied and consecutive_off >= min_off_days_to_exit
         ),
+        "macro_weights": {col: float(v1_0_daily_target.loc[last, col]) for col in v1_0_daily_target.columns},
         "base_weights": {col: float(v1_1_daily_target.loc[last, col]) for col in v1_1_daily_target.columns},
         "final_weights": {col: float(v1_2_daily_target.loc[last, col]) for col in v1_2_daily_target.columns},
     }
