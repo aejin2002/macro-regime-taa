@@ -144,9 +144,9 @@ def test_partial_month_disclosure_renders_safely():
     assert not at.exception
 
 
-def test_current_positioning_tab_renders_target_and_drifted():
+def test_current_positioning_tab_renders_risk_state():
     at = _run()
     positioning = at.tabs[1]
     headers = [m.value for m in positioning.markdown if m.value and m.value.startswith("####")]
-    assert any("Target vs Drifted Allocation" in h for h in headers)
+    assert not any("Target vs Drifted Allocation" in h for h in headers)
     assert any("Current Risk State" in h for h in headers)

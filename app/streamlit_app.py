@@ -376,19 +376,6 @@ with tab_overview:
 
 with tab_positioning:
     latest = v13.iloc[-1]
-    st.markdown("#### Target vs Drifted Allocation")
-    col_t, col_d = st.columns(2)
-    target_weights = {ASSET_DISPLAY[c]: latest[f"target_weight_{c}"] for c in ASSET_COLUMNS}
-    drifted_weights = {ASSET_DISPLAY[c]: latest[f"drifted_weight_{c}"] for c in ASSET_COLUMNS}
-    with col_t:
-        components.render_allocation_stage_card("Target Allocation (last rebalance decision)", target_weights)
-    with col_d:
-        components.render_allocation_stage_card(
-            "Drifted Allocation (actual, after price drift)",
-            drifted_weights,
-            note="Drifts from target between rebalance events as asset prices move.",
-        )
-
     st.markdown("#### Latest Contribution by Asset")
     contrib = {ASSET_DISPLAY[c]: latest[f"asset_contribution_{c}"] for c in ASSET_COLUMNS}
     st.plotly_chart(
