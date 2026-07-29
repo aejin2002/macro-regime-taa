@@ -60,12 +60,23 @@ def live_pair():
     """(bt_versioned, bt_unversioned) -- both built in this same session
     against identical, current data, differing ONLY in whether they went
     through `strategy_versions.build_versioned_config`. Must be
-    byte-identical if that module truly changes nothing for v1_2."""
+    byte-identical if that module truly changes nothing for v1_2.
+
+    `as_of` is derived from the COMMITTED SNAPSHOT's own latest date
+    (`PROD_DAILY_RETURNS`), not hardcoded: a fixed literal here silently
+    drifts out of sync every time `update-all` regenerates the snapshot
+    at a later "today" than whatever date was hardcoded when this file
+    was last touched, making `test_v1_2_daily_returns_close_to_committed_snapshot`/
+    `test_v1_2_summary_metrics_close_to_committed_snapshot` compare two
+    different date ranges (a real month-plus gap, not float-noise) --
+    that was reproduced as a pre-existing failure identically on
+    `origin/main`, unrelated to any live-pipeline work, before this fix."""
     wide = pd.read_csv(PROJECT_ROOT / "data" / "processed" / "fred_wide.csv", index_col=0, parse_dates=True)
     primary_df = pd.read_csv(
         PROJECT_ROOT / "data" / "processed" / "regime_output_primary.csv", index_col=0, parse_dates=True
     )
-    as_of = pd.Timestamp("2026-06-30")
+    prod_daily = pd.read_csv(PROD_DAILY_RETURNS, index_col=0, parse_dates=True)
+    as_of = prod_daily.index.max() + pd.Timedelta(days=1)
     raw_config = load_config()
     versioned_config = build_versioned_config(raw_config, "v1_2")
     bt_unversioned = run_fast_crisis_backtest(raw_config, primary_df["tradable_regime"], wide, as_of=as_of)
