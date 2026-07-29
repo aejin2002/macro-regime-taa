@@ -18,23 +18,31 @@ COLORS: dict[str, str] = {
     "sky": "#79BCE8",
     "sky_light": "#DCEFFA",
     "accent": "#4A9FD5",
-    "text": "#23364D",
-    "text_secondary": "#718096",
+    # Three-tier navy text hierarchy: primary (headings/values), mid
+    # (subtitles), muted (captions/secondary labels). Plotly DATA lines
+    # keep their own sky/accent palette -- this hierarchy is text-only.
+    "text": "#17365D",
+    "text_mid": "#274C77",
+    "text_secondary": "#496581",
     "border": "#D8E8F2",
     "mint": "#BFE8DD",
     "warning": "#F7E6AE",
     "risk": "#F3B7B2",
+    "amber": "#FFF3D6",
 }
 
 # One tone per card "temperature" -- used for both HTML cards (background/
-# border) and st.metric-adjacent accents. "risk" is the ONLY strongly
-# emphasized tone (ON / active-danger states); everything else is neutral.
+# border) and st.metric-adjacent accents. "risk" is a strongly emphasized
+# tone (ON / active-danger states); "reflation" is a distinct warm accent
+# for the REFLATION regime specifically, deliberately not reusing "risk"'s
+# red so it never reads as a warning/error next to Fast Crisis.
 TONE_BG: dict[str, str] = {
     "neutral": COLORS["card_bg"],
     "info": COLORS["sky_light"],
     "good": COLORS["mint"],
     "warn": COLORS["warning"],
     "risk": COLORS["risk"],
+    "reflation": "#FFF3D6",
 }
 TONE_BORDER: dict[str, str] = {
     "neutral": COLORS["border"],
@@ -42,6 +50,7 @@ TONE_BORDER: dict[str, str] = {
     "good": "#8FCFBD",
     "warn": "#E8CE6F",
     "risk": "#E08A82",
+    "reflation": "#E6B85C",
 }
 TONE_TEXT: dict[str, str] = {
     "neutral": COLORS["text"],
@@ -49,13 +58,16 @@ TONE_TEXT: dict[str, str] = {
     "good": COLORS["text"],
     "warn": COLORS["text"],
     "risk": "#8C2E27",
+    "reflation": "#9A5B00",
 }
 
 # One color per regime, used consistently everywhere a regime appears
-# (cards, tables, charts). Pastel, not saturated.
+# (cards, tables, charts). Pastel, not saturated. REFLATION uses its own
+# warm "reflation" tone (not "info") so it stands out from the neutral
+# sky-blue used elsewhere.
 REGIME_TONE: dict[str, str] = {
     "GOLDILOCKS": "good",
-    "REFLATION": "info",
+    "REFLATION": "reflation",
     "STAGFLATION": "risk",
     "CONTRACTION": "neutral",
     "UNKNOWN": "neutral",
@@ -94,6 +106,7 @@ def inject_css() -> None:
         h1 {{ font-size: 1.9rem; }}
         h2 {{ font-size: 1.25rem; margin-top: 1.4rem; }}
         h3 {{ font-size: 1.05rem; }}
+        h4 {{ margin-top: 0.85rem; margin-bottom: 0.4rem; }}
         p, span, label {{ color: {c["text_secondary"]}; }}
 
         [data-testid="stMetric"] {{
@@ -116,16 +129,17 @@ def inject_css() -> None:
 
         .hero {{ padding: 0.2rem 0 1.1rem 0; }}
         .hero-title {{ font-size: 2.1rem; font-weight: 800; color: {c["text"]}; line-height: 1.15; }}
-        .hero-sub {{ font-size: 1rem; color: {c["text_secondary"]}; margin-top: 0.2rem; }}
+        .hero-sub {{ font-size: 1rem; color: {c["text_mid"]}; margin-top: 0.2rem; }}
         .hero-meta {{ font-size: 0.85rem; color: {c["text_secondary"]}; margin-top: 0.6rem; }}
 
         .sac-card {{
             border-radius: 12px;
-            padding: 1.1rem 1.3rem;
+            padding: 0.95rem 1.15rem;
             border: 1px solid;
             box-shadow: 0 1px 3px rgba(35, 54, 77, 0.05);
-            min-height: 148px;
+            min-height: 118px;
         }}
+        .sac-card.sac-compact {{ min-height: 96px; padding: 0.8rem 1rem; }}
         .sac-label {{
             font-size: 0.76rem; font-weight: 700; letter-spacing: 0.04em;
             text-transform: uppercase; opacity: 0.7;

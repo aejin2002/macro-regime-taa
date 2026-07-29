@@ -9,7 +9,14 @@ import pandas as pd
 import streamlit as st
 
 from ui.formatters import UNKNOWN_DISPLAY, arrow_for, fmt_date
-from ui.theme import STATE_TONE, TONE_BG, TONE_BORDER, TONE_TEXT
+from ui.theme import REGIME_TONE, STATE_TONE, TONE_BG, TONE_BORDER, TONE_TEXT
+
+
+def regime_tone_for(regime: str | None) -> str:
+    """Extends the existing REGIME_TONE mapping (ui/theme.py) -- e.g.
+    REFLATION gets its own warm "reflation" tone, distinct from Fast
+    Crisis's "risk" red. Unknown/missing regimes fall back to neutral."""
+    return REGIME_TONE.get(regime or "", "neutral")
 
 
 def render_hero(title: str, subtitle: str, meta: dict[str, str]) -> None:
@@ -37,11 +44,14 @@ def fmt_status_safe(state: str | None) -> str:
     return state if state in ("ON", "OFF", "UNKNOWN") else "UNKNOWN"
 
 
-def render_status_card(title: str, value: str, status: str | None, note: str, tone: str) -> None:
+def render_status_card(
+    title: str, value: str, status: str | None, note: str, tone: str, *, compact: bool = False
+) -> None:
     bg, border, text = TONE_BG[tone], TONE_BORDER[tone], TONE_TEXT[tone]
     status_html = f'<div class="sac-status">{status}</div>' if status else ""
+    card_class = "sac-card sac-compact" if compact else "sac-card"
     html = (
-        f'<div class="sac-card" style="background:{bg}; border-color:{border}; color:{text};">'
+        f'<div class="{card_class}" style="background:{bg}; border-color:{border}; color:{text};">'
         f'<div class="sac-label">{title}</div>'
         f'<div class="sac-value">{value}</div>'
         f"{status_html}"
@@ -160,6 +170,35 @@ def render_allocation_stage_card(title: str, weights: dict[str, float] | None, n
             )
         if note:
             st.caption(note)
+
+
+def render_evidence_card(
+    *,
+    title: str,
+    effective_value: str,
+    effective_since,
+    observed_value: str,
+    observed_as_of,
+    expected_effective,
+    lag_months: int,
+    score_label: str | None = None,
+) -> None:
+    """Compact Growth/Inflation evidence card -- every value passed in is
+    already read from the production artifact by the caller; this
+    function only renders, never computes or recomputes a signal."""
+    with st.container(border=True):
+        st.markdown(f"**{title}**")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(f"Effective: **{effective_value}**")
+            st.caption(f"Effective since {fmt_date(effective_since)}")
+            if score_label:
+                st.caption(score_label)
+        with c2:
+            st.markdown(f"Latest observed: **{observed_value}**")
+            st.caption(f"Observed as of {fmt_date(observed_as_of)}")
+            st.caption(f"Expected effective: {fmt_date(expected_effective)}")
+        st.caption(f"{lag_months}-month lag -- observed becomes effective the following month.")
 
 
 def render_warning_card(message: str, *, exc: Exception | None = None) -> None:
