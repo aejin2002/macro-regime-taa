@@ -473,12 +473,22 @@ def test_performance_figures_unchanged():
 def _mock_live_result(fetched_at=None):
     v13 = pd.read_parquet(PROCESSED_DIR / "production_v13_daily.parquet")
     bench = pd.read_parquet(PROCESSED_DIR / "benchmarks_daily.parquet")
-    vix = pd.Series([15.0, 16.5, 14.2], index=pd.date_range("2026-07-26", periods=3), name="VIXCLS")
+    latest = pd.Timestamp(v13["date"].max())
+    # VIX index intentionally ends at the SAME latest date as v1_3_df so
+    # the default mock never trips the "stale" heuristic in ordinary
+    # live-mode tests -- tests that specifically want a stale live
+    # result build their own dict instead of using this helper.
+    vix = pd.Series(
+        [15.0, 16.5, 14.2], index=pd.date_range(end=latest, periods=3), name="^VIX"
+    )
     return {
         "v1_3_df": v13,
         "bench_df": bench,
         "vix_series": vix,
+        "vix_source": "yahoo_^VIX",
         "fetched_at": fetched_at or pd.Timestamp("2026-07-29 03:00:00"),
+        "pipeline_run_id": "test-run-id",
+        "source_mode": "live_pipeline",
     }
 
 
@@ -592,3 +602,102 @@ def test_release_fallback_error_never_shown_as_stack_trace(monkeypatch):
     for tab in at.tabs:
         rendered = " ".join(m.value for m in tab.markdown if m.value)
         assert "Traceback (most recent call last)" not in rendered
+
+
+# =============================================================================
+# Freshness contract: a past artifact must never be shown as if it were
+# the current live result.
+# =============================================================================
+
+
+def test_release_fallback_shows_exact_recommended_snapshot_message():
+    at = _run()
+    sidebar_text = " ".join(m.value for m in at.sidebar.markdown if m.value)
+    sidebar_captions = " ".join(c.value for c in at.sidebar.caption if c.value)
+    combined = sidebar_text + " " + sidebar_captions
+    assert "Live production data is unavailable." in combined
+    assert "Showing the last validated release snapshot as of" in combined
+    # The artifact's own as-of date, not "today" -- confirm SOME real
+    # ISO date follows the phrase.
+    v13 = pd.read_parquet(PROCESSED_DIR / "production_v13_daily.parquet")
+    artifact_date = pd.to_datetime(v13["date"]).max().date().isoformat()
+    assert artifact_date in combined
+
+
+def test_release_fallback_warning_also_shown_prominently_on_overview():
+    """Not just the sidebar (easy to miss/collapse) -- Overview itself
+    must carry the warning directly above Current Risk State."""
+    at = _run()
+    overview = at.tabs[OVERVIEW]
+    warning_text = " ".join(w.value for w in overview.warning if w.value)
+    assert "Live production data is unavailable" in warning_text
+
+
+def test_release_fallback_never_shows_a_live_refresh_timestamp():
+    """The artifact's download/resolution time must never be presented
+    as a live-refresh timestamp -- fallback mode must show "None this
+    session", never a fabricated or borrowed timestamp."""
+    at = _run()
+    sidebar_text = " ".join(m.value for m in at.sidebar.markdown if m.value)
+    assert "Last successful live refresh" in sidebar_text
+    assert "None this session" in sidebar_text
+
+
+def test_live_mode_never_shows_release_fallback_message(monkeypatch):
+    monkeypatch.setattr(data_loader, "run_live_production_pipeline", _mock_live_success)
+    at = _run()
+    sidebar_text = " ".join(m.value for m in at.sidebar.markdown if m.value)
+    sidebar_captions = " ".join(c.value for c in at.sidebar.caption if c.value)
+    assert "Live production data is unavailable" not in (sidebar_text + sidebar_captions)
+    assert not at.tabs[OVERVIEW].warning  # no fallback banner in live mode
+
+
+def test_session_cached_live_result_carries_explicit_provenance_metadata(monkeypatch):
+    """A "Cached live" result is only ever trusted because it explicitly
+    carries `source_mode == "live_pipeline"` -- not merely because a
+    DataFrame happens to be present in the session holder."""
+    monkeypatch.setattr(data_loader, "run_live_production_pipeline", _mock_live_success)
+    _run()
+    holder = data_loader._live_result_holder()
+    assert holder["last_good"]["source_mode"] == "live_pipeline"
+    assert holder["last_good"]["pipeline_run_id"]
+    assert holder["last_good"]["fetched_at"] is not None
+
+
+def test_session_value_without_provenance_metadata_is_not_trusted_as_live(monkeypatch):
+    """Simulates a corrupted/legacy holder entry (no `source_mode`) --
+    must NOT be surfaced as "Cached live"; must fall through to Release
+    fallback instead, since a bare DataFrame is not proof of a live run."""
+
+    def _fail(**kw):
+        raise RuntimeError("mock: live refresh fails")
+
+    monkeypatch.setattr(data_loader, "run_live_production_pipeline", _fail)
+    holder = data_loader._live_result_holder()
+    v13 = pd.read_parquet(PROCESSED_DIR / "production_v13_daily.parquet")
+    holder["last_good"] = {"v1_3_df": v13, "bench_df": None, "vix_series": None, "fetched_at": None}
+    # deliberately no "source_mode" / "pipeline_run_id" key
+
+    at = _run()
+    sidebar_text = " ".join(m.value for m in at.sidebar.markdown if m.value)
+    assert "🔵 Release fallback" in sidebar_text
+    assert "🟡 Cached live" not in sidebar_text
+
+
+def test_stale_market_date_flagged_even_in_live_mode(monkeypatch):
+    """A "live" result whose underlying strategy market date is far
+    behind today (simulated) is flagged stale rather than shown as an
+    unqualified green "Live" -- staleness is about the DATA's own date,
+    not just whether the fetch attempt itself succeeded."""
+
+    def _stale_live(**kw):
+        result = _mock_live_result()
+        v13 = result["v1_3_df"].copy()
+        v13["date"] = pd.to_datetime(v13["date"]) - pd.Timedelta(days=30)
+        result["v1_3_df"] = v13
+        return result
+
+    monkeypatch.setattr(data_loader, "run_live_production_pipeline", _stale_live)
+    at = _run()
+    sidebar_text = " ".join(m.value for m in at.sidebar.markdown if m.value)
+    assert "🟢 Live (data delayed)" in sidebar_text

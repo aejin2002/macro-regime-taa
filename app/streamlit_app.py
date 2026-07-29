@@ -37,6 +37,7 @@ sys.path.insert(0, str(ROOT / "app"))
 
 from ui import charts, components  # noqa: E402
 from ui.data_loader import (  # noqa: E402
+    RELEASE_FALLBACK_MESSAGE,
     benchmarks_artifact_source_info,
     data_freshness_summary,
     get_dashboard_data,
@@ -196,31 +197,48 @@ def capture_ratios(returns: pd.Series, spy_returns: pd.Series) -> tuple[float, f
 # Sidebar -- shared "as of" summary, always visible
 # =============================================================================
 
-DATA_MODE_LABELS = {
-    "live": ("🟢 Live", "Freshly fetched from FRED/Yahoo Finance and recomputed this refresh cycle."),
+# Note text is a template where relevant -- filled in at render time
+# (release_fallback needs the artifact's own as-of date; live/
+# session_fallback need `dashboard_data["is_stale"]`).
+DATA_MODE_NOTES = {
+    "live": "Freshly fetched from FRED/Yahoo Finance and recomputed this refresh cycle.",
     "session_fallback": (
-        "🟡 Cached live (stale)",
         "The latest live refresh attempt failed -- showing the last successful live result "
-        "from this session instead of jumping straight to the frozen Release artifact.",
+        "from this session instead of jumping straight to the frozen Release artifact."
     ),
-    "release_fallback": (
-        "🔵 Release fallback",
-        "Live refresh failed with no prior live result available -- showing the immutable "
-        "`v1.3.0` GitHub Release artifact.",
-    ),
+    "release_fallback": RELEASE_FALLBACK_MESSAGE,
 }
+
+
+def _mode_label(mode: str, is_stale: bool) -> str:
+    if mode == "live":
+        return "🟢 Live (data delayed)" if is_stale else "🟢 Live"
+    if mode == "session_fallback":
+        return "🟡 Cached live (stale)"
+    if mode == "release_fallback":
+        return "🔵 Release fallback"
+    return "🔴 Error"
+
 
 with st.sidebar:
     st.markdown("### Macro Regime TAA v1.3")
     st.caption(DISPLAY_NAMES.get("v1_3", "v1.3"))
 
     mode = dashboard_data["mode"]
-    mode_label, mode_note = DATA_MODE_LABELS.get(mode, ("Unknown", ""))
+    is_stale = bool(dashboard_data.get("is_stale"))
+    mode_label = _mode_label(mode, is_stale)
+    mode_note = DATA_MODE_NOTES.get(
+        mode, "Live production data is unavailable and no fallback could be loaded."
+    )
+    if mode == "release_fallback":
+        mode_note = mode_note.format(as_of=fmt_date(freshness["strategy_market_data_as_of"]))
     st.markdown(f"**Production data mode**  \n{mode_label}")
     st.caption(mode_note)
     if dashboard_data.get("fetched_at") is not None:
         fetched_label = dashboard_data["fetched_at"].strftime("%Y-%m-%d %H:%M:%S")
         st.markdown(f"**Last successful live refresh**  \n{fetched_label}")
+    else:
+        st.markdown("**Last successful live refresh**  \nNone this session")
     if dashboard_data.get("error"):
         with st.expander("Refresh error detail"):
             st.code(dashboard_data["error"])
@@ -316,6 +334,19 @@ with tab_overview:
             f"Partial month through {fmt_date(v13.index.max())} -- current month's macro target "
             "holds last month's decision forward."
         )
+
+    if dashboard_data["mode"] != "live":
+        # Hard requirement: a fallback/cached result must never read as
+        # today's current position -- this banner sits directly above
+        # Current Risk State/Positioning, not just in the (collapsible,
+        # easy-to-miss-on-narrow-screens) sidebar.
+        _fallback_note = (
+            RELEASE_FALLBACK_MESSAGE.format(as_of=fmt_date(freshness["strategy_market_data_as_of"]))
+            if dashboard_data["mode"] == "release_fallback"
+            else "Live refresh just failed -- showing the last successful live result from this "
+            f"session (as of {fmt_date(freshness['strategy_market_data_as_of'])}), not a fresh fetch."
+        )
+        st.warning(_fallback_note)
 
     # -- Current Positioning (folded in from the former separate tab) ------
     # Every value below is read from `latest`/`freshness`/`config`, already

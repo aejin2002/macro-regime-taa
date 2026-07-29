@@ -1,3 +1,7 @@
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 import pandas as pd
 import pytest
 from yfinance.exceptions import YFRateLimitError
@@ -102,3 +106,68 @@ def test_get_daily_close_uses_cache_without_touching_network(monkeypatch, tmp_pa
 
     pd.testing.assert_series_equal(first, second)
     assert calls["n"] == 1  # second call served from cache, no new network call
+
+
+# =============================================================================
+# Thread-safety: concurrent fetches on ONE client instance (the live
+# dashboard's bounded ThreadPoolExecutor prefetch pattern) must still
+# collectively respect min_request_interval_seconds, and must not race
+# or corrupt `_last_request_monotonic`.
+# =============================================================================
+
+
+class _ThreadSafeFakeTicker:
+    """Every distinct ticker "fetches" successfully immediately (no
+    rate-limit simulation here -- this suite is about PACING, not
+    retry behavior, which is already covered above)."""
+
+    def __init__(self, ticker: str) -> None:
+        self.ticker = ticker
+
+    def history(self, start: str, auto_adjust: bool) -> pd.DataFrame:
+        idx = pd.date_range("2020-01-01", periods=2, freq="D")
+        return pd.DataFrame({"Close": [100.0, 101.0]}, index=idx)
+
+
+def test_concurrent_fetches_collectively_respect_pacing(monkeypatch, tmp_path):
+    monkeypatch.setattr("macro_regime.data.asset_prices.yf.Ticker", _ThreadSafeFakeTicker)
+
+    client = _client(tmp_path, min_request_interval_seconds=0.05)
+    tickers = [f"T{i}" for i in range(6)]
+
+    start = time.monotonic()
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        list(executor.map(lambda t: client.get_daily_close(t, "2020-01-01"), tickers))
+    elapsed = time.monotonic() - start
+
+    # 6 requests paced at >= 0.05s apart, SHARED across all worker
+    # threads -- must take at least (6-1)*0.05s regardless of how many
+    # threads raced to fetch concurrently. A broken (unlocked) pacing
+    # implementation would let all 4 workers' first request through
+    # immediately, finishing in ~0.05s total instead.
+    assert elapsed >= 0.05 * (len(tickers) - 1) * 0.8, (
+        f"concurrent fetches completed in {elapsed:.3f}s -- pacing lock likely not enforced"
+    )
+
+
+def test_concurrent_fetches_do_not_corrupt_or_crash(monkeypatch, tmp_path):
+    """20 concurrent calls across 8 threads must all succeed with no
+    exceptions and no corrupted `_last_request_monotonic` state."""
+    monkeypatch.setattr("macro_regime.data.asset_prices.yf.Ticker", _ThreadSafeFakeTicker)
+
+    client = _client(tmp_path, min_request_interval_seconds=0.0)
+    tickers = [f"T{i}" for i in range(20)]
+    errors: list[Exception] = []
+    lock = threading.Lock()
+
+    def _fetch(ticker: str) -> None:
+        try:
+            client.get_daily_close(ticker, "2020-01-01")
+        except Exception as exc:  # noqa: BLE001
+            with lock:
+                errors.append(exc)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(_fetch, tickers))
+
+    assert not errors, f"concurrent fetches raised: {errors}"

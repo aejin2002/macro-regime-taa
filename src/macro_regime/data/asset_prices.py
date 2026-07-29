@@ -23,6 +23,7 @@ Design notes
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pandas as pd
@@ -57,21 +58,30 @@ class AssetPriceClient:
         cache_dir = self.settings.cache_dir.parent / "asset_cache"
         self.cache = cache or FileCache(cache_dir)
         self._last_request_monotonic: float | None = None
+        # Guards `_last_request_monotonic` so concurrent callers (e.g. a
+        # bounded ThreadPoolExecutor prefetching several tickers at once)
+        # still collectively respect ONE shared >= min_request_interval_seconds
+        # cadence against Yahoo Finance, rather than each thread racing
+        # the same stale read and firing simultaneously.
+        self._pacing_lock = threading.Lock()
 
     def _fetch_history(self, ticker: str, start: str) -> pd.DataFrame:
         """Fetch raw daily history for `ticker`, retrying on Yahoo
         Finance's per-IP rate limit with exponential backoff (same
         pattern as `FredClient._request`). Paces itself against the
-        previous live request via `min_request_interval_seconds`. Any
+        previous live request via `min_request_interval_seconds` --
+        thread-safe, so multiple concurrent callers on the same client
+        instance still serialize onto one shared pacing cadence. Any
         error other than `YFRateLimitError` is not retried and
         propagates immediately."""
         last_error: YFRateLimitError | None = None
         for attempt in range(1, self.max_retries + 1):
-            if self._last_request_monotonic is not None:
-                elapsed = time.monotonic() - self._last_request_monotonic
-                if elapsed < self.min_request_interval_seconds:
-                    time.sleep(self.min_request_interval_seconds - elapsed)
-            self._last_request_monotonic = time.monotonic()
+            with self._pacing_lock:
+                if self._last_request_monotonic is not None:
+                    elapsed = time.monotonic() - self._last_request_monotonic
+                    if elapsed < self.min_request_interval_seconds:
+                        time.sleep(self.min_request_interval_seconds - elapsed)
+                self._last_request_monotonic = time.monotonic()
             try:
                 return yf.Ticker(ticker).history(start=start, auto_adjust=True)
             except YFRateLimitError as exc:
